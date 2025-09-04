@@ -200,5 +200,4 @@ sudo ufw allow 8080/tcp
 - `/etc/systemd/system/github-feishu-bot.service`
 
 ## 许可证
-
 MIT License
