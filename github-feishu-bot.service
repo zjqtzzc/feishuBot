@@ -1,0 +1,22 @@
+[Unit]
+Description=GitHub PR to Feishu Bot Service
+After=network.target
+Wants=network.target
+
+[Service]
+Type=exec
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/github-feishu-bot
+Environment=PATH=/opt/github-feishu-bot/venv/bin
+EnvironmentFile=/opt/github-feishu-bot/.env
+ExecStart=/opt/github-feishu-bot/venv/bin/python app.py
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=github-feishu-bot
+
+[Install]
+WantedBy=multi-user.target
