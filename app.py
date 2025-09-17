@@ -13,16 +13,37 @@ import requests
 from flask import Flask, request, jsonify
 from datetime import datetime
 import logging
+from logging.handlers import RotatingFileHandler
 
 # 配置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('github-feishu-bot.log'),
-        logging.StreamHandler()
-    ]
-)
+def setup_logging():
+    """设置日志配置，包含日志轮转"""
+    # 创建日志格式
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    
+    # 创建轮转文件处理器
+    file_handler = RotatingFileHandler(
+        'github-feishu-bot.log',
+        maxBytes=10*1024*1024,  # 10MB
+        backupCount=5,          # 保留5个备份文件
+        encoding='utf-8'
+    )
+    file_handler.setFormatter(formatter)
+    file_handler.setLevel(logging.INFO)
+    
+    # 创建控制台处理器
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    console_handler.setLevel(logging.INFO)
+    
+    # 配置根日志器
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(console_handler)
+
+# 初始化日志
+setup_logging()
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
@@ -106,6 +127,57 @@ def verify_github_signature(payload, signature):
     
     return hmac.compare_digest(signature, expected_signature)
 
+def format_git_file_stats(pr_data):
+    """格式化Git风格的文件统计信息，按前2级目录分组合并"""
+    # 获取PR的文件变更信息
+    files = pr_data.get('files', [])
+    
+    if not files:
+        return "No files changed"
+    
+    # 按前2级目录分组
+    dir_stats = {}
+    
+    for file in files:
+        filename = file.get('filename', '')
+        additions = file.get('additions', 0)
+        deletions = file.get('deletions', 0)
+        
+        # 获取前2级目录
+        path_parts = filename.split('/')
+        if len(path_parts) >= 2:
+            dir_key = f"{path_parts[0]}/{path_parts[1]}"
+        else:
+            dir_key = path_parts[0] if path_parts else "root"
+        
+        if dir_key not in dir_stats:
+            dir_stats[dir_key] = {'total_additions': 0, 'total_deletions': 0, 'file_count': 0}
+        
+        dir_stats[dir_key]['total_additions'] += additions
+        dir_stats[dir_key]['total_deletions'] += deletions
+        dir_stats[dir_key]['file_count'] += 1
+    
+    # 构建统计信息
+    stat_lines = []
+    for dir_key, stats in dir_stats.items():
+        total_additions = stats['total_additions']
+        total_deletions = stats['total_deletions']
+        file_count = stats['file_count']
+        
+        # 格式化目录统计
+        if total_additions > 0 and total_deletions > 0:
+            stat_line = f" {dir_key:<30} | {total_additions + total_deletions:>3} +{total_additions}-{total_deletions} ({file_count} files)"
+        elif total_additions > 0:
+            stat_line = f" {dir_key:<30} | {total_additions:>3} +{total_additions} ({file_count} files)"
+        elif total_deletions > 0:
+            stat_line = f" {dir_key:<30} | {total_deletions:>3} -{total_deletions} ({file_count} files)"
+        else:
+            stat_line = f" {dir_key:<30} |   0 ({file_count} files)"
+        
+        stat_lines.append(stat_line)
+    
+    return "\n".join(stat_lines)
+
 def format_test_message():
     """格式化测试消息"""
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -167,17 +239,26 @@ def format_pr_message(event_data):
     requested_reviewers = pr.get('requested_reviewers', [])
     reviewer_names = [reviewer.get('login', '') for reviewer in requested_reviewers if reviewer.get('login')]
     
+    # 获取Git风格的文件统计信息
+    try:
+        git_stat = format_git_file_stats(pr)
+    except Exception as e:
+        logger.error(f"获取Git风格的文件统计信息时发生错误: {e}")
+        git_stat = "Get git stat error"
+    
     # 构建内容
     content_lines = [
         f"**{pr_title}**",
+        "",
+        f"```{git_stat}```",
         "",
         f"**提交人**: {sender_name}",
     ]
     
     if reviewer_names:
-        content_lines.append(f"**需要Review**: {', '.join(reviewer_names)}")
+        content_lines.append(f"**Reviewer**: {', '.join(reviewer_names)}")
     else:
-        content_lines.append("**需要Review**: 暂无指定")
+        content_lines.append("**Reviewer**: 暂无指定")
     
     # 构建飞书消息卡片
     message = {
