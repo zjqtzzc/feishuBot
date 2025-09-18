@@ -4,6 +4,7 @@
   "debug": false,
   "feishu_webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/your-webhook-url-here",
   "github_webhook_secret": "your-github-webhook-secret-here",
+  "github_token": "your-github-personal-access-token-here",
   "log_level": "INFO",
   "log_file": "github-feishu-bot.log"
 }

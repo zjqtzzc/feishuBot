@@ -14,6 +14,7 @@ from flask import Flask, request, jsonify
 from datetime import datetime
 import logging
 from logging.handlers import RotatingFileHandler
+from github_api import GitHubAPI
 
 # 配置日志
 def setup_logging():
@@ -64,6 +65,7 @@ class Config:
         
         # GitHub配置
         self.GITHUB_WEBHOOK_SECRET = self.config.get('github_webhook_secret', '')
+        self.GITHUB_TOKEN = self.config.get('github_token', '')
         
         # 日志配置
         self.LOG_LEVEL = self.config.get('log_level', 'INFO')
@@ -106,12 +108,13 @@ class Config:
     
     def validate(self) -> bool:
         """验证配置是否完整"""
-        if not self.FEISHU_WEBHOOK_URL:
-            return False
-        return True
+        return bool(self.FEISHU_WEBHOOK_URL)
 
 # 获取配置
 config = Config()
+
+# 创建GitHub API实例，使用配置中的token
+github_api = GitHubAPI(token=config.GITHUB_TOKEN)
 
 def verify_github_signature(payload, signature):
     """验证GitHub webhook签名"""
@@ -127,99 +130,6 @@ def verify_github_signature(payload, signature):
     
     return hmac.compare_digest(signature, expected_signature)
 
-def format_git_file_stats(pr_data):
-    """格式化Git风格的文件统计信息，按前2级目录分组合并"""
-    # 获取PR的文件变更信息
-    files = pr_data.get('files', [])
-    
-    if not files:
-        return "No files changed"
-    
-    # 按前2级目录分组
-    dir_stats = {}
-    
-    for file in files:
-        filename = file.get('filename', '')
-        additions = file.get('additions', 0)
-        deletions = file.get('deletions', 0)
-        
-        # 获取前2级目录
-        path_parts = filename.split('/')
-        if len(path_parts) >= 2:
-            dir_key = f"{path_parts[0]}/{path_parts[1]}"
-        else:
-            dir_key = path_parts[0] if path_parts else "root"
-        
-        if dir_key not in dir_stats:
-            dir_stats[dir_key] = {'total_additions': 0, 'total_deletions': 0, 'file_count': 0}
-        
-        dir_stats[dir_key]['total_additions'] += additions
-        dir_stats[dir_key]['total_deletions'] += deletions
-        dir_stats[dir_key]['file_count'] += 1
-    
-    # 构建统计信息
-    stat_lines = []
-    for dir_key, stats in dir_stats.items():
-        total_additions = stats['total_additions']
-        total_deletions = stats['total_deletions']
-        file_count = stats['file_count']
-        
-        # 格式化目录统计
-        if total_additions > 0 and total_deletions > 0:
-            stat_line = f" {dir_key:<30} | {total_additions + total_deletions:>3} +{total_additions}-{total_deletions} ({file_count} files)"
-        elif total_additions > 0:
-            stat_line = f" {dir_key:<30} | {total_additions:>3} +{total_additions} ({file_count} files)"
-        elif total_deletions > 0:
-            stat_line = f" {dir_key:<30} | {total_deletions:>3} -{total_deletions} ({file_count} files)"
-        else:
-            stat_line = f" {dir_key:<30} |   0 ({file_count} files)"
-        
-        stat_lines.append(stat_line)
-    
-    return "\n".join(stat_lines)
-
-def format_test_message():
-    """格式化测试消息"""
-    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
-    message = {
-        "msg_type": "interactive",
-        "card": {
-            "elements": [
-                {
-                    "tag": "div",
-                    "text": {
-                        "content": f"**🧪 服务测试消息**\n\n**服务状态**: ✅ 运行正常\n**启动时间**: {current_time}\n**服务端口**: {config.PORT}\n\n这是一条测试消息，用于验证飞书机器人连接是否正常。",
-                        "tag": "lark_md"
-                    }
-                },
-                {
-                    "tag": "action",
-                    "actions": [
-                        {
-                            "tag": "button",
-                            "text": {
-                                "content": "健康检查",
-                                "tag": "plain_text"
-                            },
-                            "type": "primary",
-                            "url": f"http://{config.HOST}:{config.PORT}/health"
-                        }
-                    ]
-                }
-            ],
-            "header": {
-                "template": "green",
-                "title": {
-                    "content": "GitHub PR Bot 测试",
-                    "tag": "plain_text"
-                }
-            }
-        }
-    }
-    
-    return message
-
 def format_pr_message(event_data):
     """格式化PR消息"""
     action = event_data.get('action', '')
@@ -233,7 +143,6 @@ def format_pr_message(event_data):
     pr_number = pr.get('number', '')
     repo_name = repository.get('full_name', '')
     sender_name = sender.get('login', '')
-    sender_avatar = sender.get('avatar_url', '')
     
     # 获取需要review的人
     requested_reviewers = pr.get('requested_reviewers', [])
@@ -241,10 +150,18 @@ def format_pr_message(event_data):
     
     # 获取Git风格的文件统计信息
     try:
-        git_stat = format_git_file_stats(pr)
+        git_stat = github_api.format_git_file_stats(repo_name, pr_number)
     except Exception as e:
         logger.error(f"获取Git风格的文件统计信息时发生错误: {e}")
-        git_stat = "Get git stat error"
+        # 根据错误类型提供更友好的提示
+        if "401" in str(e) or "Unauthorized" in str(e):
+            git_stat = "获取PR信息失败，请检查token是否过期"
+        elif "403" in str(e) or "Forbidden" in str(e):
+            git_stat = "获取PR信息失败，请检查token权限"
+        elif "404" in str(e) or "Not Found" in str(e):
+            git_stat = "获取PR信息失败，仓库或PR不存在"
+        else:
+            git_stat = "获取PR信息失败，请检查网络连接"
     
     # 构建内容
     content_lines = [
@@ -388,20 +305,6 @@ def health_check():
         'service': 'github-feishu-bot'
     }), 200
 
-@app.route('/test', methods=['POST'])
-def send_test_message():
-    """发送测试消息到飞书"""
-    try:
-        message = format_test_message()
-        if send_to_feishu(message):
-            logger.info("测试消息发送成功")
-            return jsonify({'status': 'success', 'message': '测试消息发送成功'}), 200
-        else:
-            logger.error("测试消息发送失败")
-            return jsonify({'status': 'error', 'message': '测试消息发送失败'}), 500
-    except Exception as e:
-        logger.error(f"发送测试消息时发生错误: {e}")
-        return jsonify({'status': 'error', 'message': f'发送测试消息时发生错误: {e}'}), 500
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
