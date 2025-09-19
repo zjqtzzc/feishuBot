@@ -1,3 +1,5 @@
 venv/
 config.json
 *.log
+github-feishu-bot.log*
+__pycache__/

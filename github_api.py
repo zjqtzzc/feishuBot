@@ -131,23 +131,28 @@ class GitHubAPI:
         # 按最优层级分组
         dir_stats = self._group_files_by_depth(files, optimal_depth)
         
+        # 计算最长的目录名称长度
+        max_dir_length = max(len(dir_key) for dir_key in dir_stats.keys()) if dir_stats else 0
+        
         # 构建统计信息
         stat_lines = []
         for dir_key, stats in dir_stats.items():
             total_additions = stats['total_additions']
             total_deletions = stats['total_deletions']
             file_count = stats['file_count']
+            total_changes = total_additions + total_deletions
             
-            # 格式化目录统计
-            if total_additions > 0 and total_deletions > 0:
-                stat_line = f" {dir_key:<30} | {total_additions + total_deletions:>3} +{total_additions}-{total_deletions} ({file_count} files)"
-            elif total_additions > 0:
-                stat_line = f" {dir_key:<30} | {total_additions:>3} +{total_additions} ({file_count} files)"
-            elif total_deletions > 0:
-                stat_line = f" {dir_key:<30} | {total_deletions:>3} -{total_deletions} ({file_count} files)"
-            else:
-                stat_line = f" {dir_key:<30} |   0 ({file_count} files)"
+            # 构建颜色化的变更信息
+            changes_parts = []
+            if total_additions > 0:
+                changes_parts.append(f"<font color='green'>+{total_additions}</font>")
+            if total_deletions > 0:
+                changes_parts.append(f"<font color='red'>-{total_deletions}</font>")
             
+            changes_text = " ".join(changes_parts) if changes_parts else "0"
+            
+            # 格式化统计行
+            stat_line = f" {dir_key:<{max_dir_length}} | {total_changes:>3} {changes_text} ({file_count} files)"
             stat_lines.append(stat_line)
         
         return "\n".join(stat_lines)
