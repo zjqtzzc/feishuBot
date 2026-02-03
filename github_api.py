@@ -54,12 +54,48 @@ class GitHubAPI:
         
         # 如果Bearer认证失败且是401错误，尝试token认证
         if response.status_code == 401 and self.token:
-            logger.info("Bearer认证失败，尝试token认证")
+            logger.debug("GitHub API: Bearer认证失败，尝试token认证")
             fallback_headers = self.headers.copy()
             fallback_headers["Authorization"] = f"token {self.token}"
             response = requests.get(url, headers=fallback_headers, timeout=self.timeout)
         
         return response
+
+    def _extract_error_message(self, response):
+        """
+        从响应中提取简洁的错误信息
+        
+        Args:
+            response: requests.Response对象
+            
+        Returns:
+            str: 简洁的错误信息
+        """
+        try:
+            # 尝试解析JSON响应
+            error_data = response.json()
+            if isinstance(error_data, dict):
+                # GitHub API错误格式
+                if 'message' in error_data:
+                    return error_data['message'][:100]  # 限制长度
+                elif 'error' in error_data:
+                    return error_data['error'][:100]
+        except:
+            pass
+        
+        # 如果无法解析JSON，返回状态码描述
+        status_descriptions = {
+            400: "请求格式错误",
+            401: "认证失败",
+            403: "权限不足",
+            404: "资源不存在",
+            429: "请求频率限制",
+            500: "服务器内部错误",
+            502: "网关错误",
+            503: "服务不可用"
+        }
+        
+        return status_descriptions.get(response.status_code, f"HTTP {response.status_code}")
 
     def get_pr_files(self, repo_name, pr_number):
         """
@@ -81,25 +117,28 @@ class GitHubAPI:
             
             if response.status_code == 200:
                 files = response.json()
-                logger.info(f"成功获取PR #{pr_number} 文件列表，共 {len(files)} 个文件")
+                logger.info(f"GitHub API: 成功获取PR #{pr_number} 文件列表，共 {len(files)} 个文件")
                 return files
             else:
-                logger.warning(f"获取PR文件列表失败，状态码: {response.status_code}, 响应: {response.text}")
+                # 只记录关键信息，避免记录大段响应内容
+                error_msg = self._extract_error_message(response)
+                logger.warning(f"GitHub API: 获取PR #{pr_number} 文件列表失败，状态码: {response.status_code}, 错误: {error_msg}")
+                
                 # 抛出具体的错误信息，让上层处理
                 if response.status_code == 401:
-                    raise Exception(f"401 Unauthorized: {response.text}")
+                    raise Exception(f"401 Unauthorized: Token无效或过期")
                 elif response.status_code == 403:
-                    raise Exception(f"403 Forbidden: {response.text}")
+                    raise Exception(f"403 Forbidden: 权限不足或API限制")
                 elif response.status_code == 404:
-                    raise Exception(f"404 Not Found: {response.text}")
+                    raise Exception(f"404 Not Found: 仓库或PR不存在")
                 else:
-                    raise Exception(f"{response.status_code}: {response.text}")
+                    raise Exception(f"{response.status_code}: API请求失败")
                 
         except requests.exceptions.RequestException as e:
-            logger.error(f"获取PR文件列表时发生网络错误: {e}")
+            logger.error(f"GitHub API: 网络请求失败 - {str(e)[:100]}")
             raise e
         except Exception as e:
-            logger.error(f"获取PR文件列表时发生未知错误: {e}")
+            logger.error(f"GitHub API: 获取PR文件列表失败 - {str(e)[:100]}")
             raise e
     
     

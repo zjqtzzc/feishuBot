@@ -167,7 +167,7 @@ def format_pr_message(event_data):
     content_lines = [
         f"**{pr_title}**",
         "",
-        f"```{git_stat}```",
+        f"{git_stat}",
         "",
         f"**提交人**: {sender_name}",
     ]
