@@ -1,257 +1,70 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
-"""
-GitHub API 模块
-用于获取GitHub仓库和PR相关信息
-"""
+"""GitHub API：获取 PR 文件与统计"""
 
 import requests
-import logging
-
-logger = logging.getLogger(__name__)
 
 class GitHubAPI:
-    """GitHub API 客户端"""
-    
     def __init__(self, timeout=10, token=None):
-        """
-        初始化GitHub API客户端
-        
-        Args:
-            timeout (int): 请求超时时间（秒）
-            token (str): GitHub Personal Access Token，用于访问私有仓库
-        """
         self.timeout = timeout
         self.base_url = "https://api.github.com"
-        self.token = token
-        self.headers = {
-            "Accept": "application/vnd.github+json",
-            "User-Agent": "GitHub-Feishu-Bot/1.0"
-        }
-        
-        # 如果有token，添加到请求头
-        if self.token:
-            # 支持两种Token格式：
-            # 1. Fine-grained tokens - 使用 Bearer 认证
-            # 2. Classic tokens - 使用 token 认证
-            # 由于两种token都以 ghp_ 开头，我们默认使用 Bearer 认证
-            # 如果Bearer认证失败，可以回退到token认证
-            self.headers["Authorization"] = f"Bearer {self.token}"
-    
-    def _make_request(self, url):
-        """
-        发送HTTP请求，支持认证回退
-        
-        Args:
-            url (str): 请求URL
-            
-        Returns:
-            requests.Response: 响应对象
-        """
-        # 首先尝试Bearer认证
-        response = requests.get(url, headers=self.headers, timeout=self.timeout)
-        
-        # 如果Bearer认证失败且是401错误，尝试token认证
-        if response.status_code == 401 and self.token:
-            logger.debug("GitHub API: Bearer认证失败，尝试token认证")
-            fallback_headers = self.headers.copy()
-            fallback_headers["Authorization"] = f"token {self.token}"
-            response = requests.get(url, headers=fallback_headers, timeout=self.timeout)
-        
-        return response
+        self.headers = {"Accept": "application/vnd.github+json", "User-Agent": "GitHub-Feishu-Bot/1.0"}
+        if token:
+            self.headers["Authorization"] = f"Bearer {token}"
+        self._token = token
 
-    def _extract_error_message(self, response):
-        """
-        从响应中提取简洁的错误信息
-        
-        Args:
-            response: requests.Response对象
-            
-        Returns:
-            str: 简洁的错误信息
-        """
-        try:
-            # 尝试解析JSON响应
-            error_data = response.json()
-            if isinstance(error_data, dict):
-                # GitHub API错误格式
-                if 'message' in error_data:
-                    return error_data['message'][:100]  # 限制长度
-                elif 'error' in error_data:
-                    return error_data['error'][:100]
-        except:
-            pass
-        
-        # 如果无法解析JSON，返回状态码描述
-        status_descriptions = {
-            400: "请求格式错误",
-            401: "认证失败",
-            403: "权限不足",
-            404: "资源不存在",
-            429: "请求频率限制",
-            500: "服务器内部错误",
-            502: "网关错误",
-            503: "服务不可用"
-        }
-        
-        return status_descriptions.get(response.status_code, f"HTTP {response.status_code}")
+    def _get(self, url):
+        r = requests.get(url, headers=self.headers, timeout=self.timeout)
+        if r.status_code == 401 and self._token:
+            h = self.headers.copy()
+            h["Authorization"] = f"token {self._token}"
+            r = requests.get(url, headers=h, timeout=self.timeout)
+        return r
 
     def get_pr_files(self, repo_name, pr_number):
-        """
-        获取PR文件列表
-        
-        Args:
-            repo_name (str): 仓库名称，格式为 "owner/repo"
-            pr_number (int): PR编号
-            
-        Returns:
-            list: PR文件列表，如果失败返回空列表
-        """
-        try:
-            # 构建API URL
-            api_url = f"{self.base_url}/repos/{repo_name}/pulls/{pr_number}/files"
-            
-            # 发送请求
-            response = self._make_request(api_url)
-            
-            if response.status_code == 200:
-                files = response.json()
-                logger.info(f"GitHub API: 成功获取PR #{pr_number} 文件列表，共 {len(files)} 个文件")
-                return files
-            else:
-                # 只记录关键信息，避免记录大段响应内容
-                error_msg = self._extract_error_message(response)
-                logger.warning(f"GitHub API: 获取PR #{pr_number} 文件列表失败，状态码: {response.status_code}, 错误: {error_msg}")
-                
-                # 抛出具体的错误信息，让上层处理
-                if response.status_code == 401:
-                    raise Exception(f"401 Unauthorized: Token无效或过期")
-                elif response.status_code == 403:
-                    raise Exception(f"403 Forbidden: 权限不足或API限制")
-                elif response.status_code == 404:
-                    raise Exception(f"404 Not Found: 仓库或PR不存在")
-                else:
-                    raise Exception(f"{response.status_code}: API请求失败")
-                
-        except requests.exceptions.RequestException as e:
-            logger.error(f"GitHub API: 网络请求失败 - {str(e)[:100]}")
-            raise e
-        except Exception as e:
-            logger.error(f"GitHub API: 获取PR文件列表失败 - {str(e)[:100]}")
-            raise e
-    
-    
+        url = f"{self.base_url}/repos/{repo_name}/pulls/{pr_number}/files"
+        r = self._get(url)
+        if r.status_code == 200:
+            return r.json()
+        if r.status_code == 401:
+            raise Exception("401 Unauthorized")
+        if r.status_code == 403:
+            raise Exception("403 Forbidden")
+        if r.status_code == 404:
+            raise Exception("404 Not Found")
+        raise Exception(f"{r.status_code}")
+
     def format_git_file_stats(self, repo_name, pr_number):
-        """
-        格式化Git风格的文件统计信息，按前2级目录分组合并
-        
-        Args:
-            repo_name (str): 仓库名称，格式为 "owner/repo"
-            pr_number (int): PR编号
-            
-        Returns:
-            str: 格式化的文件统计信息
-        """
-        # 获取文件列表
-        try:
-            files = self.get_pr_files(repo_name, pr_number)
-        except Exception as e:
-            # 重新抛出异常，让上层处理
-            raise e
-        
+        files = self.get_pr_files(repo_name, pr_number)
         if not files:
             return "No files changed"
-        
-        # 动态调整合并层级
-        max_depth = max(len(file.get('filename', '').split('/')) for file in files)
-        optimal_depth = self._find_optimal_depth(files, max_depth)
-        
-        # 按最优层级分组
-        dir_stats = self._group_files_by_depth(files, optimal_depth)
-        
-        # 计算最长的目录名称长度
-        max_dir_length = max(len(dir_key) for dir_key in dir_stats.keys()) if dir_stats else 0
-        
-        # 构建统计信息
-        stat_lines = []
-        for dir_key, stats in dir_stats.items():
-            total_additions = stats['total_additions']
-            total_deletions = stats['total_deletions']
-            file_count = stats['file_count']
-            total_changes = total_additions + total_deletions
-            
-            # 构建颜色化的变更信息
-            changes_parts = []
-            if total_additions > 0:
-                changes_parts.append(f"<font color='green'>+{total_additions}</font>")
-            if total_deletions > 0:
-                changes_parts.append(f"<font color='red'>-{total_deletions}</font>")
-            
-            changes_text = " ".join(changes_parts) if changes_parts else "0"
-            
-            # 格式化统计行
-            stat_line = f" {dir_key:<{max_dir_length}} | {total_changes:>3} {changes_text} ({file_count} files)"
-            stat_lines.append(stat_line)
-        
-        return "\n".join(stat_lines)
-    
-    def _find_optimal_depth(self, files, max_depth):
-        """
-        找到最优的合并层级
-        
-        Args:
-            files: 文件列表
-            max_depth: 最大目录深度
-            
-        Returns:
-            int: 最优层级
-        """
-        # 从2级开始尝试，逐步增加层级
-        for depth in range(2, max_depth + 1):
-            dir_stats = self._group_files_by_depth(files, depth)
-            if len(dir_stats) > 1:
-                return depth
-        
-        # 如果所有层级都只有1个分组，返回最大层级
-        return max_depth
-    
-    def _group_files_by_depth(self, files, depth):
-        """
-        按指定深度分组文件
-        
-        Args:
-            files: 文件列表
-            depth: 目录深度
-            
-        Returns:
-            dict: 分组统计信息
-        """
-        dir_stats = {}
-        
-        for file in files:
-            filename = file.get('filename', '')
-            additions = file.get('additions', 0)
-            deletions = file.get('deletions', 0)
-            
-            # 获取指定深度的目录
-            path_parts = filename.split('/')
-            if len(path_parts) >= depth:
-                dir_key = '/'.join(path_parts[:depth])
-            else:
-                dir_key = '/'.join(path_parts) if path_parts else "root"
-            
-            if dir_key not in dir_stats:
-                dir_stats[dir_key] = {'total_additions': 0, 'total_deletions': 0, 'file_count': 0}
-            
-            dir_stats[dir_key]['total_additions'] += additions
-            dir_stats[dir_key]['total_deletions'] += deletions
-            dir_stats[dir_key]['file_count'] += 1
-        
-        return dir_stats
+        max_depth = max(len(f.get('filename', '').split('/')) for f in files)
+        depth = max_depth
+        for d in range(2, max_depth + 1):
+            if len(self._group(files, d)) > 1:
+                depth = d
+                break
+        stats = self._group(files, depth)
+        max_len = max(len(k) for k in stats) if stats else 0
+        lines = []
+        for k, v in stats.items():
+            a, d, c = v['total_additions'], v['total_deletions'], v['file_count']
+            ch = []
+            if a > 0:
+                ch.append(f"<font color='green'>+{a}</font>")
+            if d > 0:
+                ch.append(f"<font color='red'>-{d}</font>")
+            lines.append(f" {k:<{max_len}} | {a+d:>3} {' '.join(ch) or '0'} ({c} files)")
+        return "\n".join(lines)
 
-# 创建全局实例
-# 从环境变量或配置文件中读取GitHub token
-import os
-github_token = os.getenv('GITHUB_TOKEN')
-github_api = GitHubAPI(token=github_token)
+    def _group(self, files, depth):
+        out = {}
+        for f in files:
+            path = f.get('filename', '').split('/')
+            key = '/'.join(path[:depth]) if len(path) >= depth else '/'.join(path) or "root"
+            if key not in out:
+                out[key] = {'total_additions': 0, 'total_deletions': 0, 'file_count': 0}
+            out[key]['total_additions'] += f.get('additions', 0)
+            out[key]['total_deletions'] += f.get('deletions', 0)
+            out[key]['file_count'] += 1
+        return out

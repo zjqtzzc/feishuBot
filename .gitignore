@@ -1,5 +1,7 @@
 venv/
 config.json
+.pr_message_map
+.feishu_token
 *.log
 github-feishu-bot.log*
 __pycache__/
