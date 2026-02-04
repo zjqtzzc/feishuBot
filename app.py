@@ -91,6 +91,7 @@ def handle(payload: bytes, sig: str, event_type: str, data: dict | None) -> tupl
         return {"error": "Feishu token failed"}, 500
 
     card_type = _card_type(data)
+    print(f"PR [{card_type}] {pr.get('title', '')}")
     message_id = pr_mapping.get(repo_name, pr_number)
 
     if message_id:

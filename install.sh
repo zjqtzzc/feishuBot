@@ -39,7 +39,7 @@ copy_project() {
         log_error "安装目录不能与脚本所在目录相同"
         exit 1
     fi
-    rsync -a --exclude='venv' --exclude='__pycache__' --exclude='.git' "$script_dir/" "$install_dir/"
+    rsync -a --exclude='venv' --exclude='__pycache__' --exclude='.git' --exclude="$(basename "$install_dir")" "$script_dir/" "$install_dir/"
 }
 
 set_normal_permissions() {
