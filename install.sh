@@ -1,72 +1,87 @@
 #!/bin/bash
 
 # GitHub PR to Feishu Bot 安装脚本
-# 注册为systemd服务并自动启动
+# 复制工程到安装目录，注册为 systemd 服务并自启动
 
 set -e
+
+# ========== 顶端配置：安装位置（可修改） ==========
+INSTALL_DIR="./output"
+# ================================================
 
 # 颜色定义
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-# 日志函数
-log_info() {
-    echo -e "${GREEN}[INFO]${NC} $1"
-}
+log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
+log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
-log_warn() {
-    echo -e "${YELLOW}[WARN]${NC} $1"
-}
-
-log_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
-}
-
-# 检查是否为root用户
 check_root() {
     if [[ $EUID -ne 0 ]]; then
-        log_error "此脚本需要root权限运行"
+        log_error "此脚本需要 root 权限运行"
         log_info "请使用: sudo $0"
         exit 1
     fi
 }
 
-# 获取当前目录
-get_current_dir() {
-    local script_dir=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
-    echo "$script_dir"
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+install_dir=$(cd "$script_dir" && mkdir -p "$INSTALL_DIR" && cd "$INSTALL_DIR" && pwd)
+run_user="${SUDO_USER:-root}"
+run_group=$(id -gn "$run_user")
+
+copy_project() {
+    log_info "复制工程到 $install_dir ..."
+    mkdir -p "$install_dir"
+    if [[ "$script_dir" == "$install_dir" ]]; then
+        log_error "安装目录不能与脚本所在目录相同"
+        exit 1
+    fi
+    rsync -a --exclude='venv' --exclude='__pycache__' --exclude='.git' "$script_dir/" "$install_dir/"
 }
 
-# 检查应用是否已安装
-check_app_installed() {
-    local current_dir=$(get_current_dir)
-    
-    if [ ! -d "$current_dir/venv" ]; then
-        log_error "虚拟环境不存在，请先运行 ./install.sh"
-        exit 1
-    fi
-    
-    if [ ! -f "$current_dir/app.py" ]; then
-        log_error "应用文件不存在，请先运行 ./install.sh"
-        exit 1
-    fi
-    
-    if [ ! -f "$current_dir/config.json" ]; then
-        log_error "配置文件不存在，请先运行 ./install.sh"
-        exit 1
-    fi
-    
-    log_info "应用检查通过"
+set_normal_permissions() {
+    log_info "设置普通文件权限..."
+    chown -R "$run_user:$run_group" "$install_dir"
+    find "$install_dir" -type d -exec chmod 755 {} +
+    find "$install_dir" -type f -exec chmod 644 {} +
+    [[ -d "$install_dir/venv/bin" ]] && find "$install_dir/venv/bin" -mindepth 1 -maxdepth 1 -exec chmod 755 {} +
 }
 
-# 配置systemd服务
+setup_venv() {
+    if [[ -d "$install_dir/venv" ]] && [[ -x "$install_dir/venv/bin/python" ]]; then
+        log_info "虚拟环境已存在，跳过创建"
+        if "$install_dir/venv/bin/pip" install -q -r "$install_dir/requirements.txt" --dry-run 2>/dev/null | grep -q "Would install"; then
+            log_info "安装缺失依赖..."
+            "$install_dir/venv/bin/pip" install -q -U pip
+            "$install_dir/venv/bin/pip" install -q -r "$install_dir/requirements.txt"
+        else
+            log_info "依赖已满足，跳过安装"
+        fi
+        return
+    fi
+    log_info "创建虚拟环境并安装依赖..."
+    python3 -m venv "$install_dir/venv"
+    "$install_dir/venv/bin/pip" install -q -U pip
+    "$install_dir/venv/bin/pip" install -q -r "$install_dir/requirements.txt"
+}
+
+check_config() {
+    if [[ ! -f "$install_dir/config.json" ]]; then
+        if [[ -f "$install_dir/config.json.example" ]]; then
+            cp "$install_dir/config.json.example" "$install_dir/config.json"
+            log_warn "已从 config.json.example 复制，请编辑 $install_dir/config.json 填写实际配置"
+        else
+            log_error "config.json 不存在且无 config.json.example"
+            exit 1
+        fi
+    fi
+}
+
 setup_systemd() {
-    local current_dir=$(get_current_dir)
-    log_info "配置systemd服务..."
-    
-    # 创建systemd服务文件
+    log_info "注册 systemd 服务..."
     cat > /etc/systemd/system/github-feishu-bot.service << EOF
 [Unit]
 Description=GitHub PR to Feishu Bot Service
@@ -75,12 +90,11 @@ Wants=network.target
 
 [Service]
 Type=exec
-User=$(whoami)
-Group=$(id -gn)
-WorkingDirectory=$current_dir
-Environment=PATH=$current_dir/venv/bin
-ExecStart=$current_dir/venv/bin/python app.py
-ExecReload=/bin/kill -HUP \$MAINPID
+User=$run_user
+Group=$run_group
+WorkingDirectory=$install_dir
+Environment=PATH=$install_dir/venv/bin:/usr/local/bin:/usr/bin
+ExecStart=$install_dir/venv/bin/python app.py
 Restart=always
 RestartSec=10
 StandardOutput=journal
@@ -90,60 +104,48 @@ SyslogIdentifier=github-feishu-bot
 [Install]
 WantedBy=multi-user.target
 EOF
-    
     systemctl daemon-reload
-    systemctl enable github-feishu-bot
-    
-    log_info "systemd服务配置完成"
 }
 
-# 启动服务
-start_service() {
-    log_info "启动服务..."
-    
+enable_and_start() {
+    log_info "设置自启动并启动服务..."
+    systemctl enable github-feishu-bot
     systemctl start github-feishu-bot
-    sleep 3
-    
+    sleep 2
     if systemctl is-active --quiet github-feishu-bot; then
         log_info "服务启动成功"
     else
         log_error "服务启动失败"
-        systemctl status github-feishu-bot
+        systemctl status github-feishu-bot --no-pager
         exit 1
     fi
 }
 
-# 显示服务信息
-show_service_info() {
-    local current_dir=$(get_current_dir)
-    local server_ip=$(hostname -I | awk '{print $1}')
-    
+show_info() {
+    local port
+    port=$(jq -r '.github_webhook_port' "$install_dir/config.json")
+    local ip=$(hostname -I | awk '{print $1}')
     echo ""
-    echo "=== 服务注册完成 ==="
-    echo "应用目录: $current_dir"
-    echo "Webhook URL: http://${server_ip}:8080/webhook"
-    echo "健康检查: http://${server_ip}:8080/health"
+    echo "=== 安装完成 ==="
+    echo "安装目录: $install_dir"
     echo ""
-    echo "服务管理命令:"
-    echo "sudo systemctl start github-feishu-bot     # 启动服务"
-    echo "sudo systemctl stop github-feishu-bot      # 停止服务"
-    echo "sudo systemctl restart github-feishu-bot   # 重启服务"
-    echo "sudo systemctl status github-feishu-bot    # 查看状态"
-    echo "sudo journalctl -u github-feishu-bot -f    # 查看日志"
-    echo ""
-    echo "服务已设置为开机自启动"
+    echo "管理命令:"
+    echo "  sudo systemctl start github-feishu-bot"
+    echo "  sudo systemctl stop github-feishu-bot"
+    echo "  sudo systemctl restart github-feishu-bot"
+    echo "  sudo journalctl -u github-feishu-bot -f"
 }
 
-# 主函数
 main() {
-    log_info "开始注册 GitHub PR to Feishu Bot 系统服务..."
+    log_info "开始安装 GitHub PR to Feishu Bot ..."
     check_root
-    check_app_installed
+    copy_project
+    setup_venv
+    set_normal_permissions
+    check_config
     setup_systemd
-    start_service
-    show_service_info
-    log_info "服务注册完成！"
+    enable_and_start
+    show_info
 }
 
-# 运行主函数
 main "$@"
