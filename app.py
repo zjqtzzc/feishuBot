@@ -42,6 +42,8 @@ def _card_type(data: dict) -> str:
     pr = data.get("pull_request", {})
     if action == "closed":
         return "merged" if pr.get("merged") else "closed"
+    if action == "reopened":
+        return "open"
     return "open"
 
 
