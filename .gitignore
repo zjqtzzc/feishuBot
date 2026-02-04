@@ -1,5 +1,8 @@
 venv/
+output/
 config.json
+config.test.json
+config.backup.json
 .pr_message_map
 .feishu_token
 *.log

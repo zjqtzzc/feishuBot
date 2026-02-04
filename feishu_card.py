@@ -26,13 +26,16 @@ def build_pr_card(event_data: dict, card_type: str = "open", github_api=None) ->
     title = pr.get("title", "")
     url = pr.get("html_url", "")
     repo_name = repo.get("full_name", "")
-    sender_name = sender.get("login", "")
+    author_name = pr.get("user", {}).get("login", "")
+    merger_name = sender.get("login", "")
     reviewers = [r.get("login", "") for r in pr.get("requested_reviewers", []) if r.get("login")]
     try:
         git_stat = github_api.format_git_file_stats(repo_name, pr.get("number", "")) if github_api else ""
     except Exception:
         git_stat = "获取PR信息失败"
-    lines = [f"**{title}**", "", git_stat, "", f"**提交人**: {sender_name}", f"**Reviewer**: {', '.join(reviewers) or '暂无指定'}"]
+    lines = [f"**{title}**", "", git_stat, "", f"**提交人**: {author_name}", f"**Reviewer**: {', '.join(reviewers) or '暂无指定'}"]
+    if card_type == "merged":
+        lines.append(f"**合并者**: {merger_name}")
     template = TYPE_TEMPLATE.get(card_type, "blue")
     header_title = f"{repo_name}: {TYPE_TITLE.get(card_type, 'Pull Request')}"
     return {
