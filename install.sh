@@ -9,7 +9,6 @@ set -e
 INSTALL_DIR="./output"
 # ================================================
 
-# 颜色定义
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -45,27 +44,29 @@ copy_project() {
 set_normal_permissions() {
     log_info "设置普通文件权限..."
     chown -R "$run_user:$run_group" "$install_dir"
-    find "$install_dir" -type d -exec chmod 755 {} +
-    find "$install_dir" -type f -exec chmod 644 {} +
-    [[ -d "$install_dir/venv/bin" ]] && find "$install_dir/venv/bin" -mindepth 1 -maxdepth 1 -exec chmod 755 {} +
+    find "$install_dir" -not -path "*/venv/*" -type d -exec chmod 755 {} +
+    find "$install_dir" -not -path "*/venv/*" -type f -exec chmod 644 {} +
 }
 
 setup_venv() {
-    if [[ -d "$install_dir/venv" ]] && [[ -x "$install_dir/venv/bin/python" ]]; then
-        log_info "虚拟环境已存在，跳过创建"
-        if "$install_dir/venv/bin/pip" install -q -r "$install_dir/requirements.txt" --dry-run 2>/dev/null | grep -q "Would install"; then
-            log_info "安装缺失依赖..."
-            "$install_dir/venv/bin/pip" install -q -U pip
-            "$install_dir/venv/bin/pip" install -q -r "$install_dir/requirements.txt"
-        else
-            log_info "依赖已满足，跳过安装"
-        fi
-        return
+    local src_venv="$script_dir/venv"
+    local dst_venv="$install_dir/venv"
+
+    if [[ ! -d "$src_venv" ]] || [[ ! -x "$src_venv/bin/python" ]]; then
+        log_error "源目录 venv 不存在或不可用，请先运行 setup.sh"
+        exit 1
     fi
-    log_info "创建虚拟环境并安装依赖..."
-    python3 -m venv "$install_dir/venv"
-    "$install_dir/venv/bin/pip" install -q -U pip
-    "$install_dir/venv/bin/pip" install -q -r "$install_dir/requirements.txt"
+
+    # 若 output/venv 是真实目录则删除，若是旧软链接也删除
+    if [[ -d "$dst_venv" ]] && [[ ! -L "$dst_venv" ]]; then
+        log_warn "output/venv 是独立虚拟环境，将替换为软链接以复用源 venv"
+        rm -rf "$dst_venv"
+    elif [[ -L "$dst_venv" ]]; then
+        rm -f "$dst_venv"
+    fi
+
+    ln -s "$src_venv" "$dst_venv"
+    log_info "已链接 venv: $dst_venv -> $src_venv"
 }
 
 check_config() {
@@ -82,7 +83,7 @@ check_config() {
 
 setup_systemd() {
     log_info "注册 systemd 服务..."
-    cat > /etc/systemd/system/github-feishu-bot.service << EOF
+    cat > /etc/systemd/system/github-feishu-bot.service << UNIT
 [Unit]
 Description=GitHub PR to Feishu Bot Service
 After=network.target
@@ -103,7 +104,7 @@ SyslogIdentifier=github-feishu-bot
 
 [Install]
 WantedBy=multi-user.target
-EOF
+UNIT
     systemctl daemon-reload
 }
 
@@ -124,10 +125,10 @@ enable_and_start() {
 show_info() {
     local port
     port=$(jq -r '.github_webhook_port' "$install_dir/config.json")
-    local ip=$(hostname -I | awk '{print $1}')
     echo ""
     echo "=== 安装完成 ==="
     echo "安装目录: $install_dir"
+    echo "使用 venv: $script_dir/venv"
     echo ""
     echo "管理命令:"
     echo "  sudo systemctl start github-feishu-bot"

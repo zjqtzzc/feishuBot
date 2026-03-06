@@ -6,6 +6,7 @@ import json
 import hmac
 import hashlib
 import os
+import sys
 
 import requests
 
@@ -71,15 +72,15 @@ def update_card(token: str, message_id: str, event_data: dict, card_type: str) -
 
 
 def handle(payload: bytes, sig: str, event_type: str, data: dict | None) -> tuple[dict, int]:
-    if not verify_signature(payload, sig):
-        return {"error": "Invalid signature"}, 401
+    if event_type != "pull_request":
+        return {"status": "ignored", "event": event_type or "unknown"}, 200
     if not data:
         return {"error": "Empty payload"}, 400
-    if event_type != "pull_request":
-        return {"status": "ignored"}, 200
+    if not verify_signature(payload, sig):
+        return {"error": "Invalid signature"}, 401
     action = data.get("action", "")
     if action not in ("opened", "synchronize", "reopened", "edited", "closed"):
-        return {"status": "ignored"}, 200
+        return {"status": "ignored", "action": action or "unknown"}, 200
 
     pr = data.get("pull_request", {})
     repo = data.get("repository", {})
@@ -107,23 +108,41 @@ def handle(payload: bytes, sig: str, event_type: str, data: dict | None) -> tupl
     return ({"status": "success"}, 200) if ok else ({"error": "Feishu send/update failed"}, 500)
 
 
+MAX_BODY = 10 * 1024 * 1024  # 10MB
+REQUEST_TIMEOUT = 30
+
+
 class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if urlparse(self.path).path not in ("/", "/webhook"):
             self._json(404, {"error": "Not Found"})
             return
         n = int(self.headers.get("Content-Length", 0))
+        if n < 0 or n > MAX_BODY:
+            self._json(400, {"error": "Invalid Content-Length"})
+            return
+        self.connection.settimeout(REQUEST_TIMEOUT)
         raw = self.rfile.read(n) if n else b""
-        try:
-            data = json.loads(raw.decode("utf-8")) if raw else None
-        except json.JSONDecodeError:
+        event_type = self.headers.get("X-GitHub-Event", "")
+        if event_type == "pull_request":
+            try:
+                data = json.loads(raw.decode("utf-8")) if raw else None
+            except json.JSONDecodeError:
+                data = None
+        else:
             data = None
         body, code = handle(
             raw,
             self.headers.get("X-Hub-Signature-256", ""),
-            self.headers.get("X-GitHub-Event", ""),
+            event_type,
             data,
         )
+        status = body.get("status") or body.get("error", "")
+        if status == "ignored":
+            reason = body.get("action") or body.get("event") or ""
+            print(f"Webhook {event_type} -> {code} ignored ({reason})", flush=True)
+        else:
+            print(f"Webhook {event_type} -> {code} {status}", flush=True)
         self._json(code, body)
 
     def _json(self, status: int, body: dict):
@@ -138,5 +157,16 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
+class QuietHTTPServer(HTTPServer):
+    """对端断开等常见错误只打一行日志，避免扫描刷屏"""
+
+    def handle_error(self, request, client_address):
+        exc_type, exc_value, _ = sys.exc_info()
+        if exc_type in (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
+            print(f"Client closed: {client_address[0]}:{client_address[1]}", flush=True)
+            return
+        super().handle_error(request, client_address)
+
+
 if __name__ == "__main__":
-    HTTPServer(("0.0.0.0", cfg.github_webhook_port), Handler).serve_forever()
+    QuietHTTPServer(("0.0.0.0", cfg.github_webhook_port), Handler).serve_forever()
