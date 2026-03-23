@@ -37,6 +37,7 @@ def get_tenant_access_token(
     token, expire_at = load_token(token_file)
     if token and expire_at > int(time.time()) + token_buffer:
         return token
+    print("Feishu token refresh begin", flush=True)
     r = requests.post(AUTH_URL, json={"app_id": app_id, "app_secret": app_secret}, timeout=timeout)
     r.raise_for_status()
     data = r.json()
@@ -44,6 +45,7 @@ def get_tenant_access_token(
         raise Exception(f"获取凭证失败：{data.get('msg', '未知错误')}")
     token = data["tenant_access_token"]
     save_token(token_file, token, int(time.time()) + data.get("expire", 7200) - token_buffer)
+    print("Feishu token refresh ok", flush=True)
     return token
 
 

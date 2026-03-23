@@ -7,6 +7,7 @@ import hmac
 import hashlib
 import os
 import sys
+import time
 
 import requests
 
@@ -19,7 +20,7 @@ from feishu_credential import (
 )
 from github_api import GitHubAPI
 from config import load_config
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 
 cfg = load_config()
@@ -55,8 +56,14 @@ def send_card(token: str, event_data: dict, card_type: str) -> str | None:
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json; charset=utf-8"}
     params = {"receive_id_type": "chat_id"}
     body = {"receive_id": cfg.chat_id, "msg_type": "interactive", "content": json.dumps(card)}
+    t0 = time.monotonic()
     r = requests.post(url, headers=headers, params=params, json=body, timeout=10)
+    elapsed = time.monotonic() - t0
     data = r.json()
+    print(
+        f"Feishu send_card http={r.status_code} code={data.get('code')} elapsed={elapsed:.3f}s",
+        flush=True,
+    )
     if data.get("code") != 0:
         return None
     return data.get("data", {}).get("message_id")
@@ -67,8 +74,15 @@ def update_card(token: str, message_id: str, event_data: dict, card_type: str) -
     card = payload["card"]
     url = f"https://open.feishu.cn/open-apis/im/v1/messages/{message_id}"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json; charset=utf-8"}
+    t0 = time.monotonic()
     r = requests.patch(url, headers=headers, json={"content": json.dumps(card)}, timeout=10)
-    return r.json().get("code") == 0
+    elapsed = time.monotonic() - t0
+    data = r.json()
+    print(
+        f"Feishu update_card http={r.status_code} code={data.get('code')} elapsed={elapsed:.3f}s",
+        flush=True,
+    )
+    return data.get("code") == 0
 
 
 def handle(payload: bytes, sig: str, event_type: str, data: dict | None) -> tuple[dict, int]:
@@ -89,7 +103,10 @@ def handle(payload: bytes, sig: str, event_type: str, data: dict | None) -> tupl
     if not repo_name or not pr_number:
         return {"error": "Missing repo/pr"}, 400
 
+    print(f"handle start action={action} repo={repo_name} pr={pr_number}", flush=True)
+    t0 = time.monotonic()
     token = get_tenant_access_token(cfg.app_id, cfg.app_secret, token_file)
+    print(f"handle token ok elapsed={time.monotonic() - t0:.3f}s", flush=True)
     if not token:
         return {"error": "Feishu token failed"}, 500
 
@@ -98,13 +115,16 @@ def handle(payload: bytes, sig: str, event_type: str, data: dict | None) -> tupl
     message_id = pr_mapping.get(repo_name, pr_number)
 
     if message_id:
+        print("handle use update_card", flush=True)
         ok = update_card(token, message_id, data, card_type)
     else:
+        print("handle use send_card", flush=True)
         message_id = send_card(token, data, card_type)
         if message_id:
             pr_mapping.set(repo_name, pr_number, message_id)
         ok = bool(message_id)
 
+    print(f"handle done ok={ok}", flush=True)
     return ({"status": "success"}, 200) if ok else ({"error": "Feishu send/update failed"}, 500)
 
 
@@ -124,6 +144,7 @@ class Handler(BaseHTTPRequestHandler):
         self.connection.settimeout(REQUEST_TIMEOUT)
         raw = self.rfile.read(n) if n else b""
         event_type = self.headers.get("X-GitHub-Event", "")
+        print(f"do_POST begin path={self.path} event={event_type} len={n}", flush=True)
         if event_type == "pull_request":
             try:
                 data = json.loads(raw.decode("utf-8")) if raw else None
@@ -157,7 +178,7 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
-class QuietHTTPServer(HTTPServer):
+class QuietHTTPServer(ThreadingHTTPServer):
     """对端断开等常见错误只打一行日志，避免扫描刷屏"""
 
     def handle_error(self, request, client_address):
@@ -169,4 +190,10 @@ class QuietHTTPServer(HTTPServer):
 
 
 if __name__ == "__main__":
-    QuietHTTPServer(("0.0.0.0", cfg.github_webhook_port), Handler).serve_forever()
+    port = cfg.github_webhook_port
+    try:
+        QuietHTTPServer(("0.0.0.0", port), Handler).serve_forever()
+    except OSError as e:
+        if getattr(e, "errno", None) == 98:
+            print(f"Bind failed: port={port} errno=98 Address already in use", flush=True)
+        raise

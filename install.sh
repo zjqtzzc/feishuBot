@@ -81,6 +81,58 @@ check_config() {
     fi
 }
 
+stop_existing_service() {
+    # 若之前已安装并启动过，则先停掉并禁用，避免后续启动再次抢端口
+    if systemctl is-active --quiet github-feishu-bot 2>/dev/null; then
+        log_info "检测到 github-feishu-bot 正在运行，准备停止..."
+        systemctl stop github-feishu-bot 2>/dev/null || true
+    fi
+    systemctl disable github-feishu-bot 2>/dev/null || true
+    systemctl reset-failed github-feishu-bot 2>/dev/null || true
+    sleep 1
+}
+
+ensure_port_released() {
+    # 仅当 config.json 可用时才尝试释放端口，避免在没配置时误杀
+    if [[ ! -f "$install_dir/config.json" ]]; then
+        return 0
+    fi
+    if ! command -v jq &> /dev/null; then
+        return 0
+    fi
+
+    local port
+    port=$(jq -r '.github_webhook_port' "$install_dir/config.json" 2>/dev/null || echo "")
+    [[ -z "$port" || "$port" == "null" ]] && return 0
+
+    local i line pid cmd
+    for i in {1..10}; do
+        # awk：若发现了 LISTEN 行(NR>1)则返回 1；若未发现则返回 0（端口已释放）
+        if ss -ltnp "sport = :${port}" 2>/dev/null | awk 'NR>1{exit 1} END{exit 0}'; then
+            return 0
+        fi
+
+        line=$(ss -ltnp "sport = :${port}" 2>/dev/null | awk 'NR==2{print; exit}')
+        pid=$(printf '%s' "$line" | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p')
+        if [[ -n "$pid" ]]; then
+            cmd=$(ps -p "$pid" -o args= 2>/dev/null || echo "")
+            if [[ "$cmd" == *"app.py"* && "$cmd" == *"$install_dir"* ]]; then
+                log_warn "端口 ${port} 仍被占用(pid=${pid})，尝试终止以避免 bind 失败..."
+                kill -9 "$pid" 2>/dev/null || true
+                sleep 1
+                continue
+            else
+                log_error "端口 ${port} 被非本服务占用: pid=${pid} cmd=${cmd}"
+                return 1
+            fi
+        fi
+        sleep 1
+    done
+
+    log_error "端口 ${port} 在超时后仍未释放，无法继续安装"
+    return 1
+}
+
 setup_systemd() {
     log_info "注册 systemd 服务..."
     cat > /etc/systemd/system/github-feishu-bot.service << UNIT
@@ -98,6 +150,12 @@ Environment=PATH=$install_dir/venv/bin:/usr/local/bin:/usr/bin
 ExecStart=$install_dir/venv/bin/python app.py
 Restart=always
 RestartSec=10
+
+# 方案A：加固停止/重启时的清理，避免旧进程仍在 LISTEN 导致新实例 bind 失败
+TimeoutStopSec=10
+KillSignal=SIGTERM
+FinalKillSignal=SIGKILL
+KillMode=control-group
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=github-feishu-bot
@@ -140,10 +198,12 @@ show_info() {
 main() {
     log_info "开始安装 GitHub PR to Feishu Bot ..."
     check_root
+    stop_existing_service
     copy_project
     setup_venv
     set_normal_permissions
     check_config
+    ensure_port_released
     setup_systemd
     enable_and_start
     show_info

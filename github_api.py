@@ -4,6 +4,7 @@
 
 import requests
 from requests.exceptions import Timeout, ConnectionError
+import time
 
 
 class GitHubAPITimeout(Exception):
@@ -20,9 +21,12 @@ class GitHubAPI:
         self._token = token
 
     def _get(self, url):
+        t0 = time.monotonic()
         try:
             r = requests.get(url, headers=self.headers, timeout=self.timeout)
         except (Timeout, ConnectionError) as e:
+            elapsed = time.monotonic() - t0
+            print(f"GitHubAPI GET failed url={url} elapsed={elapsed:.3f}s err={type(e).__name__}", flush=True)
             raise GitHubAPITimeout(str(e)) from e
         if r.status_code == 401 and self._token:
             h = self.headers.copy()
@@ -30,7 +34,11 @@ class GitHubAPI:
             try:
                 r = requests.get(url, headers=h, timeout=self.timeout)
             except (Timeout, ConnectionError) as e:
+                elapsed = time.monotonic() - t0
+                print(f"GitHubAPI GET failed url={url} elapsed={elapsed:.3f}s err={type(e).__name__}", flush=True)
                 raise GitHubAPITimeout(str(e)) from e
+        elapsed = time.monotonic() - t0
+        print(f"GitHubAPI GET url={url} status={r.status_code} elapsed={elapsed:.3f}s", flush=True)
         return r
 
     def get_pr_files(self, repo_name, pr_number):
