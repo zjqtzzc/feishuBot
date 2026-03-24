@@ -57,14 +57,26 @@ def extract_ai_review_for_card(body: str) -> str | None:
     return _extract_markdown_section(body, "## AI Code Review 总结")
 
 
-def is_claude_ai_comment(body: str) -> bool:
-    if "## AI Code Review 总结" in body:
-        return True
-    if "## 最终意见" in body:
-        return True
-    if "🤖" in body and "Claude" in body:
-        return True
-    return False
+def _first_non_empty_line(body: str) -> str:
+    for line in body.splitlines():
+        if line.strip():
+            return line.strip()
+    return ""
+
+
+AI_REVIEW_HEADER = "🤖 **Claude AI Review**"
+
+
+def is_claude_ai_comment(body: str, comment: dict[str, Any] | None = None) -> bool:
+    """仅识别 workflow 发帖：首行即 🤖 标题；排除引用块回复与楼中楼回复。"""
+    if comment and comment.get("in_reply_to_id"):
+        return False
+    first = _first_non_empty_line(body)
+    if not first:
+        return False
+    if first.startswith(">"):
+        return False
+    return first.startswith(AI_REVIEW_HEADER)
 
 
 def _render_one(ev: dict[str, Any]) -> str:

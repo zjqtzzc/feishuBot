@@ -326,7 +326,7 @@ def handle_issue_comment(
 
     store.mutate(ensure_from_issue)
 
-    if is_claude_ai_comment(body):
+    if is_claude_ai_comment(body, comment):
         review_text = extract_ai_review_for_card(body)
         if not review_text:
             return {"status": "ignored", "reason": "no_review_body"}, 200
