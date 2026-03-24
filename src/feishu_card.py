@@ -44,11 +44,15 @@ def fmt_display_time(iso_str: str) -> str:
     if not iso_str:
         return ""
     try:
-        from datetime import datetime
+        from datetime import datetime, timezone
+        from zoneinfo import ZoneInfo
 
         t = iso_str.replace("Z", "+00:00")
         dt = datetime.fromisoformat(t)
-        return dt.strftime("%Y-%m-%d %H:%M UTC")
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        cn = dt.astimezone(ZoneInfo("Asia/Shanghai"))
+        return cn.strftime("%Y-%m-%d %H:%M")
     except Exception:
         return iso_str[:19]
 
@@ -136,12 +140,12 @@ def _render_one(ev: dict[str, Any]) -> str:
     if t == "ai_review":
         body_text = ev.get("final_opinion") or ev.get("summary", "")
         author = ev.get("author", "")
-        return f"🤖 **Claude AI Review · 最终意见**（{author}）· {tm}\n{body_text}"
+        return f"💬 **{author}** · {tm}\n{body_text}"
 
     if t == "pr_comment":
         author = ev.get("author", "")
         body = ev.get("body", "")
-        return f"💬 **{author}** commented · {tm}\n{body}"
+        return f"💬 **{author}** · {tm}\n{body}"
 
     if t == "human_review":
         st = (ev.get("state") or "").lower()
@@ -150,11 +154,11 @@ def _render_one(ev: dict[str, Any]) -> str:
         if st == "approved":
             head = f"✅ **{reviewer}** approved · {tm}"
         elif st == "changes_requested":
-            head = f"❌ **{reviewer}** requested changes · {tm}"
+            head = f"❌ **{reviewer}** changes requested · {tm}"
         elif st == "dismissed":
-            head = f"⏭ **{reviewer}** review dismissed · {tm}"
+            head = f"⏭ **{reviewer}** dismissed · {tm}"
         else:
-            head = f"💬 **{reviewer}** reviewed · {tm}"
+            head = f"💬 **{reviewer}** · {tm}"
         if body:
             return f"{head}\n{body}"
         return head
