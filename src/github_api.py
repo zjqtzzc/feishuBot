@@ -90,17 +90,34 @@ class GitHubAPI:
             out[key]["file_count"] += 1
         return out
 
+    def get_commit_title_line(self, repo_name: str, sha: str) -> str:
+        """GET /commits/{sha}，返回 message 首行（subject）。"""
+        if not sha or len(sha) < 7:
+            return ""
+        url = f"{self.base_url}/repos/{repo_name}/commits/{sha}"
+        r = self._get(url)
+        if r.status_code != 200:
+            return ""
+        j = r.json()
+        msg = (j.get("commit") or {}).get("message") or ""
+        return msg.split("\n", 1)[0].strip()[:200]
+
     def get_commits_between(self, repo_name: str, base_sha: str, head_sha: str) -> tuple[int, str, list[str]]:
         """compare base...head，返回 (total_commits, head 短 SHA, 每条 commit 的 message 首行)。"""
         if not head_sha:
             return 0, "", []
+
+        short = head_sha[:7]
         if not base_sha or base_sha.startswith("0" * 7):
-            return 1, head_sha[:7], []
+            title = self.get_commit_title_line(repo_name, head_sha)
+            return 1, short, [title] if title else []
 
         url = f"{self.base_url}/repos/{repo_name}/compare/{base_sha}...{head_sha}"
         r = self._get(url)
         if r.status_code != 200:
-            return 1, head_sha[:7], []
+            title = self.get_commit_title_line(repo_name, head_sha)
+            return 1, short, [title] if title else []
+
         j = r.json()
         total = int(j.get("total_commits", 0))
         commits = j.get("commits") or []
@@ -110,4 +127,8 @@ class GitHubAPI:
             first = msg.split("\n", 1)[0].strip()[:120]
             if first:
                 msgs.append(first)
-        return total, head_sha[:7], msgs
+        if not msgs and head_sha:
+            title = self.get_commit_title_line(repo_name, head_sha)
+            if title:
+                msgs = [title]
+        return total, short, msgs

@@ -86,13 +86,18 @@ def _render_one(ev: dict[str, Any]) -> str:
         branch = ev.get("branch", "")
         sha = ev.get("head_sha", "")
         msgs = ev.get("commit_messages") or []
-        extra = ""
-        if msgs:
+        head_line = f"HEAD: `{sha}`"
+        if len(msgs) == 1:
+            head_line = f"HEAD: `{sha}`  ·  **{truncate_text(msgs[0], 200)}**"
+            extra = ""
+        elif msgs:
             lines = "\n".join(f"- {truncate_text(m, 200)}" for m in msgs[:8])
             if len(msgs) > 8:
                 lines += f"\n- … 共 {len(msgs)} 条说明"
             extra = f"\n{lines}"
-        return f"📦 **{author}** pushed **{n}** commit(s) to `{branch}` · {tm}\nHEAD: `{sha}`{extra}"
+        else:
+            extra = ""
+        return f"📦 **{author}** pushed **{n}** commit(s) to `{branch}` · {tm}\n{head_line}{extra}"
 
     if t == "pr_reopen":
         return f"🔄 **{ev.get('author', '')}** reopened · {tm}"

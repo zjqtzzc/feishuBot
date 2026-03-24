@@ -222,7 +222,12 @@ def handle_pull_request(
         branch = (pr.get("head") or {}).get("ref", "")
         total, short_sha, msgs = gh.get_commits_between(repo_name, before, after)
         if total <= 0 and after:
-            total, short_sha, msgs = 1, after[:7], []
+            total = 1
+            if not short_sha:
+                short_sha = after[:7]
+            if not msgs:
+                t = gh.get_commit_title_line(repo_name, after)
+                msgs = [t] if t else []
         ev = {
             "type": "pr_push",
             "time": tm,
