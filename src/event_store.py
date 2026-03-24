@@ -8,10 +8,24 @@ from typing import Any, Callable
 
 
 EVENT_STORE_FILENAME = ".pr_event_store"
+MAX_PR_RECORDS = 20
 
 
 def pr_key(repo_full_name: str, pr_number: str | int) -> str:
     return f"{repo_full_name}#{pr_number}"
+
+
+def trim_pr_record_count(data: dict[str, Any]) -> None:
+    """超过 MAX_PR_RECORDS 时按 last_touched 最旧优先删除。"""
+    if len(data) <= MAX_PR_RECORDS:
+        return
+    keys_by_age = sorted(
+        data.keys(),
+        key=lambda k: (data[k].get("last_touched") or "", k),
+    )
+    while len(data) > MAX_PR_RECORDS and keys_by_age:
+        oldest = keys_by_age.pop(0)
+        data.pop(oldest, None)
 
 
 class EventStore:
@@ -27,6 +41,7 @@ class EventStore:
                 raw = f.read()
                 data: dict[str, Any] = json.loads(raw) if raw.strip() else {}
                 result = fn(data)
+                trim_pr_record_count(data)
                 f.seek(0)
                 f.truncate(0)
                 f.write(json.dumps(data, ensure_ascii=False, indent=2))
@@ -61,6 +76,14 @@ class EventStore:
 
     def mutate(self, fn: Callable[[dict[str, Any]], Any]) -> Any:
         return self._mutate(fn)
+
+    def remove_record(self, repo_full_name: str, pr_number: str | int) -> None:
+        k = pr_key(repo_full_name, pr_number)
+
+        def fn(data: dict[str, Any]):
+            data.pop(k, None)
+
+        self._mutate(fn)
 
     def put_record(self, key: str, record: dict[str, Any]):
         def fn(data: dict[str, Any]):

@@ -62,6 +62,7 @@ def new_record(
         "pr_url": pr_url,
         "repo": repo,
         "events": [],
+        "last_touched": _now_iso(),
     }
 
 
@@ -94,14 +95,15 @@ def _append_event(
     record_updates: dict[str, Any] | None = None,
 ) -> None:
     k = pr_key(repo_name, pr_number)
+    ru = dict(record_updates or {})
+    ru["last_touched"] = _now_iso()
 
     def fn(data: dict[str, Any]):
         rec = data.get(k)
         if rec is None:
             return
         rec.setdefault("events", []).append(event)
-        if record_updates:
-            rec.update(record_updates)
+        rec.update(ru)
         data[k] = rec
 
     store.mutate(fn)
@@ -148,6 +150,7 @@ def _sync_card(
     def fn(data: dict[str, Any]):
         if k in data:
             data[k]["message_id"] = new_id
+            data[k]["last_touched"] = _now_iso()
 
     store.mutate(fn)
     return True
@@ -183,6 +186,7 @@ def handle_pull_request(
             k = pr_key(repo_name, pr_number)
             if k in data2:
                 data2[k]["pr_title"] = title
+                data2[k]["last_touched"] = _now_iso()
 
         store.mutate(fn2)
         ok = _sync_card(cfg, token_file, store, repo_name, pr_number)
@@ -251,6 +255,8 @@ def handle_pull_request(
             _append_event(store, repo_name, pr_number, ev, {"pr_state": "closed", "pr_title": pr.get("title", "")})
 
     ok = _sync_card(cfg, token_file, store, repo_name, pr_number)
+    if ok and action == "closed" and pr.get("merged"):
+        store.remove_record(repo_name, pr_number)
     return ({"status": "success"}, 200) if ok else ({"error": "Feishu send/update failed"}, 500)
 
 
