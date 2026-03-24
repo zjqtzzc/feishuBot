@@ -2,9 +2,12 @@
 # -*- coding: utf-8 -*-
 """GitHub API：PR 文件统计、compare 提交列表"""
 
+import logging
 import time
 
 import requests
+
+log = logging.getLogger(__name__)
 from requests.exceptions import ConnectionError, Timeout
 
 
@@ -27,7 +30,7 @@ class GitHubAPI:
             r = requests.get(url, headers=self.headers, timeout=self.timeout)
         except (Timeout, ConnectionError) as e:
             elapsed = time.monotonic() - t0
-            print(f"GitHubAPI GET failed url={url} elapsed={elapsed:.3f}s err={type(e).__name__}", flush=True)
+            log.warning("GitHubAPI GET failed url=%s %.3fs %s", url, elapsed, type(e).__name__)
             raise GitHubAPITimeout(str(e)) from e
         if r.status_code == 401 and self._token:
             h = self.headers.copy()
@@ -36,10 +39,10 @@ class GitHubAPI:
                 r = requests.get(url, headers=h, timeout=self.timeout)
             except (Timeout, ConnectionError) as e:
                 elapsed = time.monotonic() - t0
-                print(f"GitHubAPI GET failed url={url} elapsed={elapsed:.3f}s err={type(e).__name__}", flush=True)
+                log.warning("GitHubAPI GET failed url=%s %.3fs %s", url, elapsed, type(e).__name__)
                 raise GitHubAPITimeout(str(e)) from e
         elapsed = time.monotonic() - t0
-        print(f"GitHubAPI GET url={url} status={r.status_code} elapsed={elapsed:.3f}s", flush=True)
+        log.debug("GitHubAPI GET url=%s status=%s %.3fs", url, r.status_code, elapsed)
         return r
 
     def get_pr_files(self, repo_name, pr_number):

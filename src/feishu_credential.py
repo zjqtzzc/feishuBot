@@ -2,10 +2,13 @@
 """飞书 tenant_access_token 缓存与刷新"""
 
 import json
+import logging
 import os
 import time
 
 import requests
+
+log = logging.getLogger(__name__)
 
 AUTH_URL = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
 FEISHU_TOKEN_FILENAME = ".feishu_token"
@@ -37,13 +40,14 @@ def get_tenant_access_token(
     token, expire_at = load_token(token_file)
     if token and expire_at > int(time.time()) + token_buffer:
         return token
-    print("Feishu token refresh begin", flush=True)
+    log.debug("Feishu token refresh (network)")
     r = requests.post(AUTH_URL, json={"app_id": app_id, "app_secret": app_secret}, timeout=timeout)
     r.raise_for_status()
     data = r.json()
     if data.get("code") != 0:
+        log.error("Feishu token refresh failed: %s", data.get("msg", data))
         raise Exception(f"获取凭证失败：{data.get('msg', '未知错误')}")
     token = data["tenant_access_token"]
     save_token(token_file, token, int(time.time()) + data.get("expire", 7200) - token_buffer)
-    print("Feishu token refresh ok", flush=True)
+    log.debug("Feishu token refresh ok")
     return token

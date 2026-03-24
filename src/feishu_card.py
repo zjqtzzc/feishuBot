@@ -74,26 +74,19 @@ def extract_ai_review_for_card(body: str) -> str | None:
     return _extract_markdown_section(body, "## AI Code Review 总结")
 
 
-def _first_non_empty_line(body: str) -> str:
-    for line in body.splitlines():
-        if line.strip():
-            return line.strip()
-    return ""
+# GITHUB_TOKEN 发评论时作者一般为 github-actions[bot]；少数环境可能为 github-actions
+_GITHUB_ACTIONS_LOGINS = frozenset({"github-actions[bot]", "github-actions"})
 
 
-AI_REVIEW_HEADER = "🤖 **Claude AI Review**"
-
-
-def is_claude_ai_comment(body: str, comment: dict[str, Any] | None = None) -> bool:
-    """仅识别 workflow 发帖：首行即 🤖 标题；排除引用块回复与楼中楼回复。"""
-    if comment and comment.get("in_reply_to_id"):
+def is_claude_ai_comment(_body: str, comment: dict[str, Any] | None = None) -> bool:
+    """识别 AI review：仅 GitHub Actions 机器人发帖；排除楼中楼回复。"""
+    if not comment or comment.get("in_reply_to_id"):
         return False
-    first = _first_non_empty_line(body)
-    if not first:
+    user = comment.get("user") or {}
+    if user.get("type") != "Bot":
         return False
-    if first.startswith(">"):
-        return False
-    return first.startswith(AI_REVIEW_HEADER)
+    login = (user.get("login") or "").strip().lower()
+    return login in _GITHUB_ACTIONS_LOGINS
 
 
 def _render_one(ev: dict[str, Any]) -> str:

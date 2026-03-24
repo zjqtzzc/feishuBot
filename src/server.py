@@ -3,8 +3,10 @@
 """HTTP 服务：GitHub Webhook → handlers"""
 
 import json
+import logging
 import os
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
@@ -13,6 +15,9 @@ from src.event_store import EVENT_STORE_FILENAME
 from src.feishu_credential import FEISHU_TOKEN_FILENAME
 from src.github_api import GitHubAPI
 from src.handlers import handle
+from src.webhook_logging import ctx_tag, setup_logging, strip_log_fields
+
+log = logging.getLogger(__name__)
 
 MAX_BODY = 10 * 1024 * 1024
 REQUEST_TIMEOUT = 30
@@ -41,7 +46,7 @@ class Handler(BaseHTTPRequestHandler):
         self.connection.settimeout(REQUEST_TIMEOUT)
         raw = self.rfile.read(n) if n else b""
         event_type = self.headers.get("X-GitHub-Event", "")
-        print(f"do_POST begin path={self.path} event={event_type} len={n}", flush=True)
+        delivery = (self.headers.get("X-GitHub-Delivery") or "")[:8]
 
         data = None
         if event_type in ("pull_request", "pull_request_review", "issue_comment"):
@@ -51,6 +56,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(400, {"error": "Invalid JSON"})
                 return
 
+        tag, gh_action = ctx_tag(event_type, data)
+        t0 = time.monotonic()
         body, code = handle(
             raw,
             self.headers.get("X-Hub-Signature-256", ""),
@@ -61,13 +68,27 @@ class Handler(BaseHTTPRequestHandler):
             self.store_path,
             self.github_api,
         )
+        elapsed = time.monotonic() - t0
         status = body.get("status") or body.get("error", "")
-        if status == "ignored":
-            reason = body.get("action") or body.get("event") or body.get("reason") or ""
-            print(f"Webhook {event_type} -> {code} ignored ({reason})", flush=True)
+        detail = body.get("detail", "")
+        if detail:
+            tail = detail
+        elif status == "ignored":
+            tail = body.get("reason") or body.get("action") or body.get("event") or "-"
         else:
-            print(f"Webhook {event_type} -> {code} {status}", flush=True)
-        self._json(code, body)
+            tail = "-"
+        log.info(
+            "[%s] %s action=%s -> HTTP %s %s %s %.3fs delivery=%s",
+            tag,
+            event_type,
+            gh_action or "-",
+            code,
+            status,
+            tail,
+            elapsed,
+            delivery or "-",
+        )
+        self._json(code, strip_log_fields(body))
 
     def _json(self, status: int, body: dict):
         b = json.dumps(body).encode("utf-8")
@@ -85,16 +106,17 @@ class QuietHTTPServer(ThreadingHTTPServer):
     def handle_error(self, request, client_address):
         exc_type, exc_value, _ = sys.exc_info()
         if exc_type in (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
-            print(f"Client closed: {client_address[0]}:{client_address[1]}", flush=True)
+            log.debug("client closed %s:%s", client_address[0], client_address[1])
             return
         super().handle_error(request, client_address)
 
 
 def main():
+    setup_logging()
     port = Handler.cfg.github_webhook_port
     try:
         QuietHTTPServer(("0.0.0.0", port), Handler).serve_forever()
     except OSError as e:
         if getattr(e, "errno", None) == 98:
-            print(f"Bind failed: port={port} errno=98 Address already in use", flush=True)
+            log.error("bind failed port=%s address already in use", port)
         raise

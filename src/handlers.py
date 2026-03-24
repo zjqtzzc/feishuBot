@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -22,6 +23,8 @@ from src.feishu_card import (
 )
 from src.feishu_credential import get_tenant_access_token
 from src.github_api import GitHubAPI, GitHubAPITimeout
+
+log = logging.getLogger(__name__)
 
 
 def _now_iso() -> str:
@@ -158,15 +161,16 @@ def _sync_card(
     if not rec:
         return False
     t0 = time.monotonic()
+    ctx = f"[{repo_name}#{pr_number}]"
     token = get_tenant_access_token(cfg.app_id, cfg.app_secret, token_file)
-    print(f"sync_card token ok elapsed={time.monotonic() - t0:.3f}s", flush=True)
+    log.info("%s token ok %.3fs", ctx, time.monotonic() - t0)
     if not token:
         return False
     card = build_timeline_card(rec)
     mid = rec.get("message_id")
     if mid:
-        return patch_interactive_card(token, mid, card)
-    new_id = send_interactive_card(token, cfg.chat_id, card)
+        return patch_interactive_card(token, mid, card, ctx=ctx)
+    new_id = send_interactive_card(token, cfg.chat_id, card, ctx=ctx)
     if not new_id:
         return False
 
@@ -222,10 +226,11 @@ def handle_pull_request(
 
         store.mutate(fn2)
         ok = _sync_card(cfg, token_file, store, repo_name, pr_number)
-        return ({"status": "success"}, 200) if ok else ({"error": "Feishu update failed"}, 500)
+        return ({"status": "success", "detail": "title_edited"}, 200) if ok else ({"error": "Feishu update failed"}, 500)
 
     st = pr_state_from_payload(pr)
     tm = _iso_from_pr(pr)
+    detail = ""
 
     if action == "opened":
         try:
@@ -256,6 +261,7 @@ def handle_pull_request(
                 "pr_url": pr.get("html_url", ""),
             },
         )
+        detail = "pr_open"
     elif action == "synchronize":
         before = data.get("before") or ""
         after = data.get("after") or pr.get("head", {}).get("sha", "")
@@ -278,6 +284,7 @@ def handle_pull_request(
             "commit_messages": msgs,
         }
         _append_event(store, repo_name, pr_number, ev, {"pr_state": st, "pr_title": pr.get("title", "")})
+        detail = "pr_push"
     elif action == "review_requested":
         label = _label_requested_reviewer(data.get("requested_reviewer"))
         if label:
@@ -288,21 +295,27 @@ def handle_pull_request(
                 "reviewer": label,
             }
             _append_event(store, repo_name, pr_number, ev, {"pr_state": st, "pr_title": pr.get("title", "")})
+            detail = "review_requested"
     elif action == "reopened":
         ev = {"type": "pr_reopen", "time": tm, "author": sender_login}
         _append_event(store, repo_name, pr_number, ev, {"pr_state": "open", "pr_title": pr.get("title", "")})
+        detail = "pr_reopen"
     elif action == "closed":
         if pr.get("merged"):
             ev = {"type": "pr_merge", "time": tm, "merger": sender_login}
             _append_event(store, repo_name, pr_number, ev, {"pr_state": "merged", "pr_title": pr.get("title", "")})
+            detail = "pr_merge"
         else:
             ev = {"type": "pr_close", "time": tm, "author": sender_login}
             _append_event(store, repo_name, pr_number, ev, {"pr_state": "closed", "pr_title": pr.get("title", "")})
+            detail = "pr_close"
 
     ok = _sync_card(cfg, token_file, store, repo_name, pr_number)
     if ok and action == "closed" and pr.get("merged"):
         store.remove_record(repo_name, pr_number)
-    return ({"status": "success"}, 200) if ok else ({"error": "Feishu send/update failed"}, 500)
+    if ok:
+        return {"status": "success", "detail": detail or "sync"}, 200
+    return ({"error": "Feishu send/update failed"}, 500)
 
 
 def handle_pull_request_review(
@@ -336,7 +349,7 @@ def handle_pull_request_review(
     }
     _append_event(store, repo_name, pr_number, ev, {"pr_state": pr_state_from_payload(pr), "pr_title": pr.get("title", "")})
     ok = _sync_card(cfg, token_file, store, repo_name, pr_number)
-    return ({"status": "success"}, 200) if ok else ({"error": "Feishu send/update failed"}, 500)
+    return ({"status": "success", "detail": "human_review"}, 200) if ok else ({"error": "Feishu send/update failed"}, 500)
 
 
 def handle_issue_comment(
@@ -391,7 +404,7 @@ def handle_issue_comment(
         }
         _append_event(store, repo_name, pr_number, ev, {"pr_title": issue.get("title", "")})
         ok = _sync_card(cfg, token_file, store, repo_name, pr_number)
-        return ({"status": "success"}, 200) if ok else ({"error": "Feishu send/update failed"}, 500)
+        return ({"status": "success", "detail": "ai_review"}, 200) if ok else ({"error": "Feishu send/update failed"}, 500)
 
     plain = strip_blockquote_lines(body)
     if not plain:
@@ -406,7 +419,7 @@ def handle_issue_comment(
     }
     _append_event(store, repo_name, pr_number, ev, {"pr_title": issue.get("title", "")})
     ok = _sync_card(cfg, token_file, store, repo_name, pr_number)
-    return ({"status": "success"}, 200) if ok else ({"error": "Feishu send/update failed"}, 500)
+    return ({"status": "success", "detail": "pr_comment"}, 200) if ok else ({"error": "Feishu send/update failed"}, 500)
 
 
 def handle(
