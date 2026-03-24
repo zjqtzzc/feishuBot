@@ -46,8 +46,14 @@ SYSTEM_PROMPT = """你是一个持续跟进 PR 的专业代码 reviewer，使用
 
 
 def get_diff():
+    # 用 merge-base 找到 PR 分支真正的分叉点，避免把目标分支上其他 PR 的改动也算进来
+    merge_base = subprocess.run(
+        ["git", "merge-base", BASE_SHA, HEAD_SHA],
+        capture_output=True, text=True
+    ).stdout.strip()
+
     result = subprocess.run(
-        ["git", "diff", BASE_SHA, HEAD_SHA],
+        ["git", "diff", merge_base, HEAD_SHA],
         capture_output=True, text=True
     )
     filtered_lines = []
