@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import json
 import logging
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -25,6 +26,18 @@ from src.feishu_credential import get_tenant_access_token
 from src.github_api import GitHubAPI, GitHubAPITimeout
 
 log = logging.getLogger(__name__)
+
+# 同一 PR 并发 webhook（opened + review_requested、重试等）会并发 _sync_card，若都见 message_id 为空会各发一条飞书消息
+_pr_sync_locks: dict[str, threading.Lock] = {}
+_pr_sync_locks_guard = threading.Lock()
+
+
+def _sync_lock_for_pr(repo_name: str, pr_number: int) -> threading.Lock:
+    k = pr_key(repo_name, pr_number)
+    with _pr_sync_locks_guard:
+        if k not in _pr_sync_locks:
+            _pr_sync_locks[k] = threading.Lock()
+        return _pr_sync_locks[k]
 
 
 def _now_iso() -> str:
@@ -157,32 +170,33 @@ def _sync_card(
     repo_name: str,
     pr_number: int,
 ) -> bool:
-    rec = store.get(repo_name, pr_number)
-    if not rec:
-        return False
-    t0 = time.monotonic()
-    ctx = f"[{repo_name}#{pr_number}]"
-    token = get_tenant_access_token(cfg.app_id, cfg.app_secret, token_file)
-    log.info("%s token ok %.3fs", ctx, time.monotonic() - t0)
-    if not token:
-        return False
-    card = build_timeline_card(rec)
-    mid = rec.get("message_id")
-    if mid:
-        return patch_interactive_card(token, mid, card, ctx=ctx)
-    new_id = send_interactive_card(token, cfg.chat_id, card, ctx=ctx)
-    if not new_id:
-        return False
+    with _sync_lock_for_pr(repo_name, pr_number):
+        rec = store.get(repo_name, pr_number)
+        if not rec:
+            return False
+        t0 = time.monotonic()
+        ctx = f"[{repo_name}#{pr_number}]"
+        token = get_tenant_access_token(cfg.app_id, cfg.app_secret, token_file)
+        log.info("%s token ok %.3fs", ctx, time.monotonic() - t0)
+        if not token:
+            return False
+        card = build_timeline_card(rec)
+        mid = rec.get("message_id")
+        if mid:
+            return patch_interactive_card(token, mid, card, ctx=ctx)
+        new_id = send_interactive_card(token, cfg.chat_id, card, ctx=ctx)
+        if not new_id:
+            return False
 
-    k = pr_key(repo_name, pr_number)
+        k = pr_key(repo_name, pr_number)
 
-    def fn(data: dict[str, Any]):
-        if k in data:
-            data[k]["message_id"] = new_id
-            data[k]["last_touched"] = _now_iso()
+        def fn(data: dict[str, Any]):
+            if k in data:
+                data[k]["message_id"] = new_id
+                data[k]["last_touched"] = _now_iso()
 
-    store.mutate(fn)
-    return True
+        store.mutate(fn)
+        return True
 
 
 def handle_pull_request(
