@@ -32,16 +32,3 @@ def patch_interactive_card(token: str, message_id: str, card: dict, timeout: int
     data = r.json()
     print(f"Feishu patch_card http={r.status_code} code={data.get('code')} elapsed={elapsed:.3f}s", flush=True)
     return data.get("code") == 0
-
-
-def delete_message(token: str, message_id: str, timeout: int = 10) -> tuple[bool, str]:
-    """撤回机器人发送的消息（有 24h 等限制，失败时返回 API msg）。"""
-    url = f"{FEISHU_MSG_URL}/{message_id}"
-    headers = {"Authorization": f"Bearer {token}"}
-    r = requests.delete(url, headers=headers, timeout=timeout)
-    try:
-        data = r.json()
-    except Exception:
-        return False, r.text[:200]
-    msg = data.get("msg") or str(data)
-    return data.get("code") == 0, msg
