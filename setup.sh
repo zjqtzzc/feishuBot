@@ -62,7 +62,7 @@ setup_config() {
 test_setup() {
     log_info "验证配置与导入..."
     source venv/bin/activate
-    python3 -c "from config import load_config; load_config(); print('config OK')" || log_error "config 加载失败，请检查 config.json 必填项"
+    python3 -c "from src.config import load_config; load_config(); print('config OK')" || log_error "config 加载失败，请检查 config.json 必填项"
     python3 -c "import app; print('app OK')" || log_error "app 导入失败"
     log_info "验证通过"
 }

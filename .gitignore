@@ -4,6 +4,7 @@ config.json
 config.test.json
 config.backup.json
 .pr_message_map
+.pr_event_store
 .feishu_token
 *.log
 github-feishu-bot.log*

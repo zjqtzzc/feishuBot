@@ -1,6 +1,7 @@
 {
   "github_webhook_port": 8080,
   "github_token": "your-github-personal-access-token-here",
+  "github_webhook_secret": "",
   "app_id": "your-feishu-app-id",
   "app_secret": "your-feishu-app-secret",
   "chat_id": "oc_xxx"
