@@ -38,7 +38,15 @@ copy_project() {
         log_error "安装目录不能与脚本所在目录相同"
         exit 1
     fi
-    rsync -a --exclude='venv' --exclude='__pycache__' --exclude='.git' --exclude="$(basename "$install_dir")" "$script_dir/" "$install_dir/"
+    # 不拷贝运行时缓存与本地 token（目标机由服务自行生成）
+    rsync -a \
+        --exclude='venv' \
+        --exclude='__pycache__' \
+        --exclude='.git' \
+        --exclude="$(basename "$install_dir")" \
+        --exclude='.pr_event_store' \
+        --exclude='.feishu_token' \
+        "$script_dir/" "$install_dir/"
 }
 
 set_normal_permissions() {

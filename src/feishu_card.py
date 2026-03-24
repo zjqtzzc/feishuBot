@@ -6,7 +6,10 @@ from __future__ import annotations
 import re
 from typing import Any
 
-TYPE_TEMPLATE = {"open": "blue", "merged": "green", "closed": "grey"}
+TYPE_TEMPLATE = {"open": "red", "merged": "green", "closed": "grey"}
+
+# 与 handlers.pr_state_from_payload 一致，共 3 种
+PR_STATE_HEADER_EN = {"open": "Open", "merged": "Merged", "closed": "Closed"}
 
 MAX_SINGLE_EVENT_CHARS = 2000
 MAX_TIMELINE_CHARS = 22000
@@ -178,13 +181,13 @@ def _trim_events(events: list[dict[str, Any]], budget: int) -> tuple[list[dict[s
 
 def build_timeline_card(record: dict[str, Any]) -> dict:
     repo = record.get("repo", "")
-    title = record.get("pr_title", "")
     pr_url = record.get("pr_url", "")
     pr_state = record.get("pr_state", "open")
     events = list(record.get("events") or [])
 
-    template = TYPE_TEMPLATE.get(pr_state, "blue")
-    header_title = truncate_text(f"{repo}: {title}", 200)
+    template = TYPE_TEMPLATE.get(pr_state, "red")
+    state_label = PR_STATE_HEADER_EN.get(pr_state, pr_state.capitalize())
+    header_title = truncate_text(f"{repo} · {state_label}", 200)
 
     trimmed, omitted = _trim_events(events, MAX_TIMELINE_CHARS)
     elements: list[dict[str, Any]] = []
