@@ -1,9 +1,13 @@
 # -*- coding: utf-8 -*-
-"""配置读取：从多路径查找 config.json，未找到或解析失败则抛错"""
+"""配置：从项目根目录的 config.json 加载"""
 
 import json
 import os
 from dataclasses import dataclass, fields
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+DEFAULT_PATHS = [os.path.join(_ROOT, "config.json")]
 
 
 @dataclass
@@ -13,14 +17,11 @@ class Config:
     app_id: str
     app_secret: str
     chat_id: str
+    github_webhook_secret: str = ""
 
 
-DEFAULT_PATHS = [
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json"),
-]
-
-
-def load_config(paths: list[str] = DEFAULT_PATHS) -> Config:
+def load_config(paths: list[str] | None = None) -> Config:
+    paths = paths or DEFAULT_PATHS
     for p in paths:
         if os.path.exists(p):
             try:
@@ -29,6 +30,8 @@ def load_config(paths: list[str] = DEFAULT_PATHS) -> Config:
             except (json.JSONDecodeError, OSError) as e:
                 raise RuntimeError(f"读取配置失败 {p}: {e}") from e
             for f in fields(Config):
+                if f.name == "github_webhook_secret":
+                    continue
                 if f.name not in raw:
                     raise RuntimeError(f"配置缺少必填项: {f.name}")
             return Config(
@@ -37,5 +40,10 @@ def load_config(paths: list[str] = DEFAULT_PATHS) -> Config:
                 app_id=raw["app_id"],
                 app_secret=raw["app_secret"],
                 chat_id=raw["chat_id"],
+                github_webhook_secret=str(raw.get("github_webhook_secret", "")),
             )
     raise FileNotFoundError(f"未找到配置文件，已尝试: {paths}")
+
+
+def project_root() -> str:
+    return _ROOT
