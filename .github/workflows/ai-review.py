@@ -46,15 +46,22 @@ SYSTEM_PROMPT = """你是一个持续跟进 PR 的专业代码 reviewer，使用
 
 
 def get_diff():
+    if not BASE_SHA or not HEAD_SHA:
+        raise RuntimeError(f"BASE_SHA 或 HEAD_SHA 为空，BASE_SHA={BASE_SHA!r}, HEAD_SHA={HEAD_SHA!r}")
+
     # 用 merge-base 找到 PR 分支真正的分叉点，避免把目标分支上其他 PR 的改动也算进来
-    merge_base = subprocess.run(
+    proc = subprocess.run(
         ["git", "merge-base", BASE_SHA, HEAD_SHA],
-        capture_output=True, text=True
-    ).stdout.strip()
+        capture_output=True, text=True, check=True
+    )
+    merge_base = proc.stdout.strip()
+    if not merge_base:
+        raise RuntimeError(f"git merge-base 返回空，BASE_SHA={BASE_SHA}, HEAD_SHA={HEAD_SHA}")
+    print(f"merge_base: {merge_base}")
 
     result = subprocess.run(
         ["git", "diff", merge_base, HEAD_SHA],
-        capture_output=True, text=True
+        capture_output=True, text=True, check=True
     )
     filtered_lines = []
     skip = False
