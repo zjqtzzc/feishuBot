@@ -17,6 +17,7 @@ from src.feishu_card import (
     build_timeline_card,
     extract_ai_review_for_card,
     is_claude_ai_comment,
+    strip_blockquote_lines,
     truncate_issue_comment_body,
 )
 from src.feishu_credential import get_tenant_access_token
@@ -341,7 +342,7 @@ def handle_issue_comment(
         ok = _sync_card(cfg, token_file, store, repo_name, pr_number)
         return ({"status": "success"}, 200) if ok else ({"error": "Feishu send/update failed"}, 500)
 
-    plain = body.strip()
+    plain = strip_blockquote_lines(body)
     if not plain:
         return {"status": "ignored", "reason": "empty_comment"}, 200
 

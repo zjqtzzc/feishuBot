@@ -13,6 +13,16 @@ MAX_TIMELINE_CHARS = 22000
 MAX_ISSUE_COMMENT_BODY = 100
 
 
+def strip_blockquote_lines(text: str) -> str:
+    """去掉 Markdown 引用行（> …），回复里只保留用户自写内容。"""
+    out: list[str] = []
+    for line in text.splitlines():
+        if line.lstrip().startswith(">"):
+            continue
+        out.append(line)
+    return "\n".join(out).strip()
+
+
 def truncate_issue_comment_body(s: str, max_len: int = MAX_ISSUE_COMMENT_BODY) -> str:
     s = s.strip()
     if len(s) <= max_len:
