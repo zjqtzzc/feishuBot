@@ -40,6 +40,31 @@ def pr_state_from_payload(pr: dict[str, Any]) -> str:
     return "open"
 
 
+def _requested_reviewers_from_pr(pr: dict[str, Any]) -> list[str]:
+    out: list[str] = []
+    for u in pr.get("requested_reviewers") or []:
+        lg = u.get("login")
+        if lg:
+            out.append(lg)
+    for team in pr.get("requested_teams") or []:
+        slug = team.get("slug") or team.get("name")
+        if slug:
+            out.append(f"team/{slug}")
+    return out
+
+
+def _label_requested_reviewer(obj: dict[str, Any] | None) -> str:
+    if not obj:
+        return ""
+    lg = obj.get("login")
+    if lg:
+        return lg
+    slug = obj.get("slug") or obj.get("name")
+    if slug:
+        return f"team/{slug}"
+    return ""
+
+
 def verify_signature(payload: bytes, sig: str, secret: str) -> bool:
     if not secret:
         return True
@@ -164,7 +189,14 @@ def handle_pull_request(
     gh: GitHubAPI,
 ) -> tuple[dict, int]:
     action = data.get("action", "")
-    if action not in ("opened", "synchronize", "reopened", "edited", "closed"):
+    if action not in (
+        "opened",
+        "synchronize",
+        "reopened",
+        "edited",
+        "closed",
+        "review_requested",
+    ):
         return {"status": "ignored", "action": action or "unknown"}, 200
 
     pr = data.get("pull_request") or {}
@@ -202,7 +234,7 @@ def handle_pull_request(
             file_stat = "⚠️ GitHub 连接超时，无法获取文件列表"
         except Exception:
             file_stat = "⚠️ GitHub 文件列表获取失败"
-        ev = {
+        ev: dict[str, Any] = {
             "type": "pr_open",
             "time": tm,
             "author": sender_login,
@@ -210,6 +242,9 @@ def handle_pull_request(
             "pr_number": pr_number,
             "file_stat": file_stat,
         }
+        req = _requested_reviewers_from_pr(pr)
+        if req:
+            ev["requested_reviewers"] = req
         _append_event(
             store,
             repo_name,
@@ -243,6 +278,16 @@ def handle_pull_request(
             "commit_messages": msgs,
         }
         _append_event(store, repo_name, pr_number, ev, {"pr_state": st, "pr_title": pr.get("title", "")})
+    elif action == "review_requested":
+        label = _label_requested_reviewer(data.get("requested_reviewer"))
+        if label:
+            ev = {
+                "type": "review_requested",
+                "time": tm,
+                "requester": sender_login,
+                "reviewer": label,
+            }
+            _append_event(store, repo_name, pr_number, ev, {"pr_state": st, "pr_title": pr.get("title", "")})
     elif action == "reopened":
         ev = {"type": "pr_reopen", "time": tm, "author": sender_login}
         _append_event(store, repo_name, pr_number, ev, {"pr_state": "open", "pr_title": pr.get("title", "")})

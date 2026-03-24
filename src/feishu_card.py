@@ -52,7 +52,7 @@ def fmt_display_time(iso_str: str) -> str:
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         cn = dt.astimezone(ZoneInfo("Asia/Shanghai"))
-        return cn.strftime("%Y-%m-%d %H:%M")
+        return cn.strftime("%m-%d %H:%M")
     except Exception:
         return iso_str[:19]
 
@@ -105,9 +105,16 @@ def _render_one(ev: dict[str, Any]) -> str:
         num = ev.get("pr_number", "")
         author = ev.get("author", "")
         fs = ev.get("file_stat", "")
-        return (
-            f"📬 **{author}** opened · {tm}\n**{title}** #{num}\n\n{fs}"
-        )
+        req = ev.get("requested_reviewers") or []
+        block = f"📬 **{author}** opened · {tm}\n**{title}** #{num}\n\n{fs}"
+        if req:
+            block += f"\n\n👀 Review: {', '.join(req)}"
+        return block
+
+    if t == "review_requested":
+        rq = ev.get("requester", "")
+        rv = ev.get("reviewer", "")
+        return f"👀 **{rq}** requested **{rv}** · {tm}"
 
     if t == "pr_push":
         author = ev.get("author", "")
