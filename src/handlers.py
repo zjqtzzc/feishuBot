@@ -13,7 +13,12 @@ from typing import Any
 from src.config import Config
 from src.event_store import EventStore, pr_key
 from src.feishu_api import patch_interactive_card, send_interactive_card
-from src.feishu_card import build_timeline_card, extract_ai_summary, is_claude_ai_comment
+from src.feishu_card import (
+    build_timeline_card,
+    extract_ai_review_for_card,
+    is_claude_ai_comment,
+    truncate_issue_comment_body,
+)
 from src.feishu_credential import get_tenant_access_token
 from src.github_api import GitHubAPI, GitHubAPITimeout
 
@@ -101,12 +106,15 @@ def _append_event(
     store.mutate(fn)
 
 
-def _has_ai_comment_id(store: EventStore, repo_name: str, pr_number: int, comment_id: int) -> bool:
+def _has_comment_id_seen(store: EventStore, repo_name: str, pr_number: int, comment_id: int) -> bool:
+    """同一 issue_comment id 只处理一次（含 AI 与普通评论）。"""
+    if not comment_id:
+        return False
     rec = store.get(repo_name, pr_number)
     if not rec:
         return False
     for ev in rec.get("events") or []:
-        if ev.get("type") == "ai_review" and ev.get("comment_id") == comment_id:
+        if ev.get("comment_id") == comment_id:
             return True
     return False
 
@@ -289,13 +297,6 @@ def handle_issue_comment(
 
     comment = data.get("comment") or {}
     body = comment.get("body") or ""
-    if not is_claude_ai_comment(body):
-        return {"status": "ignored", "reason": "not_ai_review"}, 200
-
-    summary = extract_ai_summary(body)
-    if not summary:
-        return {"status": "ignored", "reason": "no_summary_section"}, 200
-
     repo = data.get("repository") or {}
     repo_name = repo.get("full_name", "")
     pr_number = int(issue.get("number") or 0)
@@ -306,7 +307,7 @@ def handle_issue_comment(
     if not repo_name or not pr_number:
         return {"error": "Missing repo/pr"}, 400
 
-    if comment_id and _has_ai_comment_id(store, repo_name, pr_number, comment_id):
+    if comment_id and _has_comment_id_seen(store, repo_name, pr_number, comment_id):
         return {"status": "ignored", "reason": "duplicate_comment"}, 200
 
     k = pr_key(repo_name, pr_number)
@@ -314,18 +315,37 @@ def handle_issue_comment(
     title = issue.get("title", "")
     st = "closed" if issue.get("state") == "closed" else "open"
 
-    def ensure_from_issue(data: dict[str, Any]):
-        if k not in data:
-            data[k] = new_record(repo_name, pr_number, pr_url, title, st)
+    def ensure_from_issue(d: dict[str, Any]):
+        if k not in d:
+            d[k] = new_record(repo_name, pr_number, pr_url, title, st)
 
     store.mutate(ensure_from_issue)
 
+    if is_claude_ai_comment(body):
+        review_text = extract_ai_review_for_card(body)
+        if not review_text:
+            return {"status": "ignored", "reason": "no_review_body"}, 200
+        ev = {
+            "type": "ai_review",
+            "time": tm,
+            "author": author,
+            "comment_id": comment_id,
+            "final_opinion": review_text,
+        }
+        _append_event(store, repo_name, pr_number, ev, {"pr_title": issue.get("title", "")})
+        ok = _sync_card(cfg, token_file, store, repo_name, pr_number)
+        return ({"status": "success"}, 200) if ok else ({"error": "Feishu send/update failed"}, 500)
+
+    plain = body.strip()
+    if not plain:
+        return {"status": "ignored", "reason": "empty_comment"}, 200
+
     ev = {
-        "type": "ai_review",
+        "type": "pr_comment",
         "time": tm,
         "author": author,
         "comment_id": comment_id,
-        "summary": summary,
+        "body": truncate_issue_comment_body(plain),
     }
     _append_event(store, repo_name, pr_number, ev, {"pr_title": issue.get("title", "")})
     ok = _sync_card(cfg, token_file, store, repo_name, pr_number)

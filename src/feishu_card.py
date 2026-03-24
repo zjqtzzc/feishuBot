@@ -10,6 +10,14 @@ TYPE_TEMPLATE = {"open": "blue", "merged": "green", "closed": "grey"}
 
 MAX_SINGLE_EVENT_CHARS = 2000
 MAX_TIMELINE_CHARS = 22000
+MAX_ISSUE_COMMENT_BODY = 100
+
+
+def truncate_issue_comment_body(s: str, max_len: int = MAX_ISSUE_COMMENT_BODY) -> str:
+    s = s.strip()
+    if len(s) <= max_len:
+        return s
+    return s[:max_len] + "…"
 
 
 def truncate_text(s: str, max_len: int) -> str:
@@ -32,18 +40,27 @@ def fmt_display_time(iso_str: str) -> str:
         return iso_str[:19]
 
 
-def extract_ai_summary(body: str) -> str | None:
-    marker = "## AI Code Review 总结"
-    if marker not in body:
+def _extract_markdown_section(body: str, heading_line: str) -> str | None:
+    if heading_line not in body:
         return None
-    after = body.split(marker, 1)[1]
+    after = body.split(heading_line, 1)[1]
     parts = re.split(r"\n##\s+", after, maxsplit=1)
-    summary = parts[0].strip()
-    return summary if summary else None
+    text = parts[0].strip()
+    return text if text else None
+
+
+def extract_ai_review_for_card(body: str) -> str | None:
+    """飞书卡片展示：优先「最终意见」，否则回退「AI Code Review 总结」（兼容旧格式）。"""
+    t = _extract_markdown_section(body, "## 最终意见")
+    if t:
+        return t
+    return _extract_markdown_section(body, "## AI Code Review 总结")
 
 
 def is_claude_ai_comment(body: str) -> bool:
     if "## AI Code Review 总结" in body:
+        return True
+    if "## 最终意见" in body:
         return True
     if "🤖" in body and "Claude" in body:
         return True
@@ -87,9 +104,14 @@ def _render_one(ev: dict[str, Any]) -> str:
         return f"🟢 **{ev.get('merger', '')}** merged · {tm}"
 
     if t == "ai_review":
-        summary = ev.get("summary", "")
+        body_text = ev.get("final_opinion") or ev.get("summary", "")
         author = ev.get("author", "")
-        return f"🤖 **Claude AI Review**（{author}）· {tm}\n{summary}"
+        return f"🤖 **Claude AI Review · 最终意见**（{author}）· {tm}\n{body_text}"
+
+    if t == "pr_comment":
+        author = ev.get("author", "")
+        body = ev.get("body", "")
+        return f"💬 **{author}** commented · {tm}\n{body}"
 
     if t == "human_review":
         st = (ev.get("state") or "").lower()
