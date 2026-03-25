@@ -407,8 +407,6 @@ def handle_issue_comment(
 
     if is_claude_ai_comment(body, comment):
         review_text = extract_ai_review_for_card(body)
-        if not review_text:
-            return {"status": "ignored", "reason": "no_review_body"}, 200
         ev = {
             "type": "ai_review",
             "time": tm,

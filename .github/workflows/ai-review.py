@@ -20,29 +20,50 @@ GITHUB_HEADERS = {
     "Accept": "application/vnd.github+json",
 }
 
-SYSTEM_PROMPT = """你是一个持续跟进 PR 的专业代码 reviewer，使用中文。
+PROJECT_CONTEXT = """项目背景：C++17 自动洗车机器人系统，使用 Apollo Cyber RT（类 ROS 事件驱动框架）通信，Vue 3 前端。
+四臂机器人平台，主要依赖 Eigen3、Pinocchio（运动学）、FCL（碰撞检测）、ruckig（轨迹）。
+命名规范：类 CamelCase，函数 camelBack，私有成员 _ 后缀，宏 UPPER_CASE。"""
+
+REVIEW_FORMAT = """输出严格使用以下两个标题，不要增设其他标题或小节：
+
+## 总结
+（内容）
+
+## 问题
+每条问题用 `- 🔴`/`- 🟡`/`- 🟢` 开头（🔴 阻塞 / 🟡 建议 / 🟢 nit），一条一个 `-`。
+无问题则只写"无"。"""
+
+SYSTEM_PROMPT = f"""你是一个专业代码 reviewer，使用中文。
+
+{PROJECT_CONTEXT}
 
 重点关注：
 - 潜在的 bug 或逻辑错误
-- 安全风险（SQL 注入、未校验输入等）
+- 安全风险（空指针/悬垂引用、数组越界、多线程竞争、浮点 NaN 传播等）
 - 明显的性能问题
 - 代码可读性和命名规范
 
-请用以下 Markdown 格式输出：
+{REVIEW_FORMAT}
 
-## AI Code Review 总结
-（1-2 句整体评价）
+「总结」：1～2 句概括修改内容，1～2 句说明能否接受及理由。
+「问题」：简单问题 1～2 行；复杂问题可 4～6 行。同类只写一次。
 
-## 需要关注的问题
-（如果有问题，列出具体行号和说明；没有则写"无明显问题"）
+保持简洁，不要复述 diff 内容。"""
 
-## 建议改进
-（可选的优化建议，非强制）
+INCREMENTAL_SYSTEM_PROMPT = f"""你是一个专业代码 reviewer，正在对 PR 的后续提交做增量 review，使用中文。
 
-## 最终意见
-（根据以上分析，给出能否接受此次 PR 的意见）
+{PROJECT_CONTEXT}
 
-保持简洁，不要重复 diff 内容本身。"""
+你会收到之前的评论历史和本次新增的 diff。重点判断：
+- 之前指出的问题是否已修复
+- 新代码是否引入了新的 bug、安全或性能问题
+
+{REVIEW_FORMAT}
+
+「总结」：1～2 句说明之前的问题是否解决，整体是否可接受。
+「问题」：仅列未修复的旧问题和新引入的问题，已解决的不再提及。无问题则写"无"。
+
+尽量简短。"""
 
 
 def get_diff():
@@ -102,16 +123,16 @@ def get_pr_comments():
 
 def call_claude(diff, history_text=None):
     """
-    首次 review：单轮，全量 diff。
-    后续 review：多轮，携带历史对话 + 增量 diff。
+    首次 review：单轮，全量 diff，使用 SYSTEM_PROMPT。
+    后续 review：多轮，携带历史对话 + 增量 diff，使用 INCREMENTAL_SYSTEM_PROMPT。
     """
     if not history_text:
-        # 首次：无历史
+        system = SYSTEM_PROMPT
         messages = [
             {"role": "user", "content": f"请 review 以下代码变更：\n\n```diff\n{diff}\n```"}
         ]
     else:
-        # 后续：将历史对话作为上下文，再给出增量 diff
+        system = INCREMENTAL_SYSTEM_PROMPT
         messages = [
             {
                 "role": "user",
@@ -130,10 +151,7 @@ def call_claude(diff, history_text=None):
                 "content": (
                     "作者在此之后推送了新的 commit，增量 diff 如下：\n\n"
                     f"```diff\n{diff}\n```\n\n"
-                    "请基于以上历史上下文进行 review：\n"
-                    "- 之前指出的问题是否已修复？\n"
-                    "- 新代码是否引入了新问题？\n"
-                    "- 无需重复之前已解决的内容。"
+                    "请基于以上历史上下文进行增量 review。"
                 ),
             },
         ]
@@ -148,7 +166,7 @@ def call_claude(diff, history_text=None):
         json={
             "model": "claude-sonnet-4-6",
             "max_tokens": 1024,
-            "system": SYSTEM_PROMPT,
+            "system": system,
             "messages": messages,
         },
         timeout=60,

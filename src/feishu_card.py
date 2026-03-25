@@ -66,12 +66,10 @@ def _extract_markdown_section(body: str, heading_line: str) -> str | None:
     return text if text else None
 
 
-def extract_ai_review_for_card(body: str) -> str | None:
-    """飞书卡片展示：优先「最终意见」，否则回退「AI Code Review 总结」（兼容旧格式）。"""
-    t = _extract_markdown_section(body, "## 最终意见")
-    if t:
-        return t
-    return _extract_markdown_section(body, "## AI Code Review 总结")
+def extract_ai_review_for_card(body: str) -> str:
+    """提取「## 总结」段落用于飞书卡片展示。"""
+    t = _extract_markdown_section(body, "## 总结")
+    return t or "⚠️ AI Review 格式匹配失败，请查看 GitHub 原文"
 
 
 # GITHUB_TOKEN 发评论时作者一般为 github-actions[bot]；少数环境可能为 github-actions
