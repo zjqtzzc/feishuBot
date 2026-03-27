@@ -84,21 +84,3 @@ class EventStore:
             data.pop(k, None)
 
         self._mutate(fn)
-
-    def put_record(self, key: str, record: dict[str, Any]):
-        def fn(data: dict[str, Any]):
-            data[key] = record
-
-        self._mutate(fn)
-
-    def update_record(self, repo_full_name: str, pr_number: str | int, updater: Callable[[dict[str, Any]], None]):
-        k = pr_key(repo_full_name, pr_number)
-
-        def fn(data: dict[str, Any]):
-            rec = data.get(k)
-            if rec is None:
-                return
-            updater(rec)
-            data[k] = rec
-
-        self._mutate(fn)

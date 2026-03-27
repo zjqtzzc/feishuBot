@@ -7,6 +7,7 @@ import os
 import time
 
 import requests
+from requests.exceptions import RequestException
 
 log = logging.getLogger(__name__)
 
@@ -41,12 +42,16 @@ def get_tenant_access_token(
     if token and expire_at > int(time.time()) + token_buffer:
         return token
     log.debug("Feishu token refresh (network)")
-    r = requests.post(AUTH_URL, json={"app_id": app_id, "app_secret": app_secret}, timeout=timeout)
-    r.raise_for_status()
+    try:
+        r = requests.post(AUTH_URL, json={"app_id": app_id, "app_secret": app_secret}, timeout=timeout)
+        r.raise_for_status()
+    except RequestException as e:
+        log.error("Feishu token refresh network error: %s", e)
+        return None
     data = r.json()
     if data.get("code") != 0:
         log.error("Feishu token refresh failed: %s", data.get("msg", data))
-        raise Exception(f"获取凭证失败：{data.get('msg', '未知错误')}")
+        return None
     token = data["tenant_access_token"]
     save_token(token_file, token, int(time.time()) + data.get("expire", 7200) - token_buffer)
     log.debug("Feishu token refresh ok")

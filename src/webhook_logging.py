@@ -7,6 +7,8 @@ import logging
 import sys
 from typing import Any
 
+HTTP_RESPONSE_EXCLUDE_KEYS = frozenset({"detail"})
+
 
 def setup_logging() -> None:
     root = logging.getLogger()
@@ -45,4 +47,4 @@ def ctx_tag(event_type: str, data: dict[str, Any] | None) -> tuple[str, str]:
 
 def strip_log_fields(body: dict[str, Any]) -> dict[str, Any]:
     """HTTP 响应里不返回仅供日志的字段。"""
-    return {k: v for k, v in body.items() if k != "detail"}
+    return {k: v for k, v in body.items() if k not in HTTP_RESPONSE_EXCLUDE_KEYS}

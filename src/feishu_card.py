@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Callable
+
+from src.timeline_event_type import TimelineEventType
 
 TYPE_TEMPLATE = {"open": "red", "merged": "green", "closed": "grey"}
 
@@ -87,81 +89,120 @@ def is_claude_ai_comment(_body: str, comment: dict[str, Any] | None = None) -> b
     return login in _GITHUB_ACTIONS_LOGINS
 
 
+def _render_pr_open(ev: dict[str, Any]) -> str:
+    tm = fmt_display_time(ev.get("time", ""))
+    title = ev.get("title", "")
+    num = ev.get("pr_number", "")
+    author = ev.get("author", "")
+    fs = ev.get("file_stat", "")
+    return f"📬 **{author}** opened · {tm}\n**{title}** #{num}\n\n{fs}"
+
+
+def _render_review_requested(ev: dict[str, Any]) -> str:
+    tm = fmt_display_time(ev.get("time", ""))
+    rq = ev.get("requester", "")
+    rv = ev.get("reviewer", "")
+    return f"👀 **{rq}** requested **{rv}** · {tm}"
+
+
+def _render_pr_ready(ev: dict[str, Any]) -> str:
+    tm = fmt_display_time(ev.get("time", ""))
+    return f"📋 **{ev.get('author', '')}** marked ready for review · {tm}"
+
+
+def _render_pr_push(ev: dict[str, Any]) -> str:
+    tm = fmt_display_time(ev.get("time", ""))
+    author = ev.get("author", "")
+    n = ev.get("commit_count", 0)
+    branch = ev.get("branch", "")
+    sha = ev.get("head_sha", "")
+    msgs = [str(m).strip() for m in (ev.get("commit_messages") or []) if str(m).strip()]
+    head = f"📦 **{author}** pushed **{n}** commit(s) to `{branch}` · {tm}\n"
+
+    if len(msgs) == 1:
+        return head + f"**{truncate_text(msgs[0], 200)}** · `{sha}`"
+    if len(msgs) > 1:
+        first = truncate_text(msgs[0], 200)
+        lines = "\n".join(f"- {truncate_text(m, 200)}" for m in msgs[1:8])
+        if len(msgs) > 8:
+            lines += f"\n- … 共 {len(msgs)} 条说明"
+        extra = f"\n{lines}" if lines else ""
+        return head + f"**{first}** · `{sha}`{extra}"
+    return head + f"`{sha}`"
+
+
+def _render_pr_reopen(ev: dict[str, Any]) -> str:
+    tm = fmt_display_time(ev.get("time", ""))
+    return f"🔄 **{ev.get('author', '')}** reopened · {tm}"
+
+
+def _render_pr_close(ev: dict[str, Any]) -> str:
+    tm = fmt_display_time(ev.get("time", ""))
+    return f"🚫 **{ev.get('author', '')}** closed · {tm}"
+
+
+def _render_pr_merge(ev: dict[str, Any]) -> str:
+    tm = fmt_display_time(ev.get("time", ""))
+    return f"🟢 **{ev.get('merger', '')}** merged · {tm}"
+
+
+def _render_ai_review(ev: dict[str, Any]) -> str:
+    tm = fmt_display_time(ev.get("time", ""))
+    body_text = ev.get("final_opinion") or ev.get("summary", "")
+    author = ev.get("author", "")
+    return f"💬 **{author}** · {tm}\n{body_text}"
+
+
+def _render_pr_comment(ev: dict[str, Any]) -> str:
+    tm = fmt_display_time(ev.get("time", ""))
+    author = ev.get("author", "")
+    body = ev.get("body", "")
+    return f"💬 **{author}** · {tm}\n{body}"
+
+
+def _render_human_review(ev: dict[str, Any]) -> str:
+    tm = fmt_display_time(ev.get("time", ""))
+    st = (ev.get("state") or "").lower()
+    reviewer = ev.get("reviewer", "")
+    body = (ev.get("body") or "").strip()
+    if st == "approved":
+        head = f"✅ **{reviewer}** approved · {tm}"
+    elif st == "changes_requested":
+        head = f"❌ **{reviewer}** changes requested · {tm}"
+    elif st == "dismissed":
+        head = f"⏭ **{reviewer}** dismissed · {tm}"
+    else:
+        head = f"💬 **{reviewer}** · {tm}"
+    if body:
+        return f"{head}\n{body}"
+    return head
+
+
+def _render_unknown(ev: dict[str, Any]) -> str:
+    t = ev.get("type", "")
+    return f"（未知事件 `{t}`）"
+
+
+_TIMELINE_RENDERERS: dict[str, Callable[[dict[str, Any]], str]] = {
+    TimelineEventType.PR_OPEN.value: _render_pr_open,
+    TimelineEventType.REVIEW_REQUESTED.value: _render_review_requested,
+    TimelineEventType.PR_READY.value: _render_pr_ready,
+    TimelineEventType.PR_PUSH.value: _render_pr_push,
+    TimelineEventType.PR_REOPEN.value: _render_pr_reopen,
+    TimelineEventType.PR_CLOSE.value: _render_pr_close,
+    TimelineEventType.PR_MERGE.value: _render_pr_merge,
+    TimelineEventType.AI_REVIEW.value: _render_ai_review,
+    TimelineEventType.PR_COMMENT.value: _render_pr_comment,
+    TimelineEventType.HUMAN_REVIEW.value: _render_human_review,
+}
+
+
 def _render_one(ev: dict[str, Any]) -> str:
     t = ev.get("type", "")
-    tm = fmt_display_time(ev.get("time", ""))
-
-    if t == "pr_open":
-        title = ev.get("title", "")
-        num = ev.get("pr_number", "")
-        author = ev.get("author", "")
-        fs = ev.get("file_stat", "")
-        req = ev.get("requested_reviewers") or []
-        block = f"📬 **{author}** opened · {tm}\n**{title}** #{num}\n\n{fs}"
-        if req:
-            block += f"\n\n👀 Review: {', '.join(req)}"
-        return block
-
-    if t == "review_requested":
-        rq = ev.get("requester", "")
-        rv = ev.get("reviewer", "")
-        return f"👀 **{rq}** requested **{rv}** · {tm}"
-
-    if t == "pr_push":
-        author = ev.get("author", "")
-        n = ev.get("commit_count", 0)
-        branch = ev.get("branch", "")
-        sha = ev.get("head_sha", "")
-        msgs = ev.get("commit_messages") or []
-        head_line = f"HEAD: `{sha}`"
-        if len(msgs) == 1:
-            head_line = f"HEAD: `{sha}`  ·  **{truncate_text(msgs[0], 200)}**"
-            extra = ""
-        elif msgs:
-            lines = "\n".join(f"- {truncate_text(m, 200)}" for m in msgs[:8])
-            if len(msgs) > 8:
-                lines += f"\n- … 共 {len(msgs)} 条说明"
-            extra = f"\n{lines}"
-        else:
-            extra = ""
-        return f"📦 **{author}** pushed **{n}** commit(s) to `{branch}` · {tm}\n{head_line}{extra}"
-
-    if t == "pr_reopen":
-        return f"🔄 **{ev.get('author', '')}** reopened · {tm}"
-
-    if t == "pr_close":
-        return f"🚫 **{ev.get('author', '')}** closed · {tm}"
-
-    if t == "pr_merge":
-        return f"🟢 **{ev.get('merger', '')}** merged · {tm}"
-
-    if t == "ai_review":
-        body_text = ev.get("final_opinion") or ev.get("summary", "")
-        author = ev.get("author", "")
-        return f"💬 **{author}** · {tm}\n{body_text}"
-
-    if t == "pr_comment":
-        author = ev.get("author", "")
-        body = ev.get("body", "")
-        return f"💬 **{author}** · {tm}\n{body}"
-
-    if t == "human_review":
-        st = (ev.get("state") or "").lower()
-        reviewer = ev.get("reviewer", "")
-        body = (ev.get("body") or "").strip()
-        if st == "approved":
-            head = f"✅ **{reviewer}** approved · {tm}"
-        elif st == "changes_requested":
-            head = f"❌ **{reviewer}** changes requested · {tm}"
-        elif st == "dismissed":
-            head = f"⏭ **{reviewer}** dismissed · {tm}"
-        else:
-            head = f"💬 **{reviewer}** · {tm}"
-        if body:
-            return f"{head}\n{body}"
-        return head
-
-    return f"（未知事件 `{t}`）"
+    fn = _TIMELINE_RENDERERS.get(t)
+    if fn:
+        return fn(ev)
+    return _render_unknown(ev)
 
 
 def _trim_events(events: list[dict[str, Any]], budget: int) -> tuple[list[dict[str, Any]], bool]:

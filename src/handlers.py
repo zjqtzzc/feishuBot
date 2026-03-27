@@ -5,39 +5,20 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import json
-import logging
-import threading
-import time
 from datetime import datetime, timezone
 from typing import Any
 
 from src.config import Config
 from src.event_store import EventStore, pr_key
-from src.feishu_api import patch_interactive_card, send_interactive_card
 from src.feishu_card import (
-    build_timeline_card,
     extract_ai_review_for_card,
     is_claude_ai_comment,
     strip_blockquote_lines,
     truncate_issue_comment_body,
 )
-from src.feishu_credential import get_tenant_access_token
+from src.feishu_sync import sync_card_if_published
 from src.github_api import GitHubAPI, GitHubAPITimeout
-
-log = logging.getLogger(__name__)
-
-# 同一 PR 并发 webhook（opened + review_requested、重试等）会并发 _sync_card，若都见 message_id 为空会各发一条飞书消息
-_pr_sync_locks: dict[str, threading.Lock] = {}
-_pr_sync_locks_guard = threading.Lock()
-
-
-def _sync_lock_for_pr(repo_name: str, pr_number: int) -> threading.Lock:
-    k = pr_key(repo_name, pr_number)
-    with _pr_sync_locks_guard:
-        if k not in _pr_sync_locks:
-            _pr_sync_locks[k] = threading.Lock()
-        return _pr_sync_locks[k]
+from src.timeline_event_type import TimelineEventType
 
 
 def _now_iso() -> str:
@@ -54,19 +35,6 @@ def pr_state_from_payload(pr: dict[str, Any]) -> str:
     if pr.get("state") == "closed":
         return "closed"
     return "open"
-
-
-def _requested_reviewers_from_pr(pr: dict[str, Any]) -> list[str]:
-    out: list[str] = []
-    for u in pr.get("requested_reviewers") or []:
-        lg = u.get("login")
-        if lg:
-            out.append(lg)
-    for team in pr.get("requested_teams") or []:
-        slug = team.get("slug") or team.get("name")
-        if slug:
-            out.append(f"team/{slug}")
-    return out
 
 
 def _label_requested_reviewer(obj: dict[str, Any] | None) -> str:
@@ -163,41 +131,6 @@ def _has_comment_id_seen(store: EventStore, repo_name: str, pr_number: int, comm
     return False
 
 
-def _sync_card(
-    cfg: Config,
-    token_file: str,
-    store: EventStore,
-    repo_name: str,
-    pr_number: int,
-) -> bool:
-    with _sync_lock_for_pr(repo_name, pr_number):
-        rec = store.get(repo_name, pr_number)
-        if not rec:
-            return False
-        t0 = time.monotonic()
-        ctx = f"[{repo_name}#{pr_number}]"
-        token = get_tenant_access_token(cfg.app_id, cfg.app_secret, token_file)
-        log.info("%s token ok %.3fs", ctx, time.monotonic() - t0)
-        if not token:
-            return False
-        card = build_timeline_card(rec)
-        mid = rec.get("message_id")
-        if mid:
-            return patch_interactive_card(token, mid, card, ctx=ctx)
-        new_id = send_interactive_card(token, cfg.chat_id, card, ctx=ctx)
-        if not new_id:
-            return False
-
-        k = pr_key(repo_name, pr_number)
-
-        def fn(data: dict[str, Any]):
-            if k in data:
-                data[k]["message_id"] = new_id
-                data[k]["last_touched"] = _now_iso()
-
-        store.mutate(fn)
-        return True
-
 
 def handle_pull_request(
     data: dict[str, Any],
@@ -214,6 +147,7 @@ def handle_pull_request(
         "edited",
         "closed",
         "review_requested",
+        "ready_for_review",
     ):
         return {"status": "ignored", "action": action or "unknown"}, 200
 
@@ -239,7 +173,7 @@ def handle_pull_request(
                 data2[k]["last_touched"] = _now_iso()
 
         store.mutate(fn2)
-        ok = _sync_card(cfg, token_file, store, repo_name, pr_number)
+        ok = sync_card_if_published(cfg, token_file, store, repo_name, pr_number, publish_first=False)
         return ({"status": "success", "detail": "title_edited"}, 200) if ok else ({"error": "Feishu update failed"}, 500)
 
     st = pr_state_from_payload(pr)
@@ -254,16 +188,13 @@ def handle_pull_request(
         except Exception:
             file_stat = "⚠️ GitHub 文件列表获取失败"
         ev: dict[str, Any] = {
-            "type": "pr_open",
+            "type": TimelineEventType.PR_OPEN.value,
             "time": tm,
             "author": sender_login,
             "title": pr.get("title", ""),
             "pr_number": pr_number,
             "file_stat": file_stat,
         }
-        req = _requested_reviewers_from_pr(pr)
-        if req:
-            ev["requested_reviewers"] = req
         _append_event(
             store,
             repo_name,
@@ -280,16 +211,25 @@ def handle_pull_request(
         before = data.get("before") or ""
         after = data.get("after") or pr.get("head", {}).get("sha", "")
         branch = (pr.get("head") or {}).get("ref", "")
-        total, short_sha, msgs = gh.get_commits_between(repo_name, before, after)
-        if total <= 0 and after:
-            total = 1
-            if not short_sha:
-                short_sha = after[:7]
-            if not msgs:
+        try:
+            total, short_sha, msgs = gh.get_commits_between(repo_name, before, after)
+            if total <= 0 and after:
+                total = 1
+                if not short_sha:
+                    short_sha = after[:7]
+                if not msgs:
+                    t = gh.get_commit_title_line(repo_name, after)
+                    msgs = [t] if t else []
+            if total == 1 and after and (not msgs or not str(msgs[0]).strip()):
                 t = gh.get_commit_title_line(repo_name, after)
-                msgs = [t] if t else []
+                if t:
+                    msgs = [t]
+        except GitHubAPITimeout:
+            total, short_sha, msgs = 1, after[:7] if after else "", []
+        except Exception:
+            total, short_sha, msgs = 1, after[:7] if after else "", []
         ev = {
-            "type": "pr_push",
+            "type": TimelineEventType.PR_PUSH.value,
             "time": tm,
             "author": sender_login,
             "branch": branch,
@@ -303,28 +243,39 @@ def handle_pull_request(
         label = _label_requested_reviewer(data.get("requested_reviewer"))
         if label:
             ev = {
-                "type": "review_requested",
+                "type": TimelineEventType.REVIEW_REQUESTED.value,
                 "time": tm,
                 "requester": sender_login,
                 "reviewer": label,
             }
             _append_event(store, repo_name, pr_number, ev, {"pr_state": st, "pr_title": pr.get("title", "")})
             detail = "review_requested"
+    elif action == "ready_for_review":
+        ev = {"type": TimelineEventType.PR_READY.value, "time": tm, "author": sender_login}
+        _append_event(store, repo_name, pr_number, ev, {"pr_state": st, "pr_title": pr.get("title", "")})
+        detail = "pr_ready"
     elif action == "reopened":
-        ev = {"type": "pr_reopen", "time": tm, "author": sender_login}
+        ev = {"type": TimelineEventType.PR_REOPEN.value, "time": tm, "author": sender_login}
         _append_event(store, repo_name, pr_number, ev, {"pr_state": "open", "pr_title": pr.get("title", "")})
         detail = "pr_reopen"
     elif action == "closed":
         if pr.get("merged"):
-            ev = {"type": "pr_merge", "time": tm, "merger": sender_login}
+            ev = {"type": TimelineEventType.PR_MERGE.value, "time": tm, "merger": sender_login}
             _append_event(store, repo_name, pr_number, ev, {"pr_state": "merged", "pr_title": pr.get("title", "")})
             detail = "pr_merge"
         else:
-            ev = {"type": "pr_close", "time": tm, "author": sender_login}
+            ev = {"type": TimelineEventType.PR_CLOSE.value, "time": tm, "author": sender_login}
             _append_event(store, repo_name, pr_number, ev, {"pr_state": "closed", "pr_title": pr.get("title", "")})
             detail = "pr_close"
 
-    ok = _sync_card(cfg, token_file, store, repo_name, pr_number)
+    # Draft：仅写 store，ready_for_review 时首次发群；非 Draft：opened 即首次发群。request review 不再作为首次触发。
+    if action == "opened":
+        publish_first = not pr.get("draft", False)
+    elif action == "ready_for_review":
+        publish_first = True
+    else:
+        publish_first = False
+    ok = sync_card_if_published(cfg, token_file, store, repo_name, pr_number, publish_first=publish_first)
     if ok and action == "closed" and pr.get("merged"):
         store.remove_record(repo_name, pr_number)
     if ok:
@@ -355,14 +306,14 @@ def handle_pull_request_review(
     tm = review.get("submitted_at") or _iso_from_pr(pr)
     body = (review.get("body") or "").strip()
     ev = {
-        "type": "human_review",
+        "type": TimelineEventType.HUMAN_REVIEW.value,
         "time": tm,
         "reviewer": user,
         "state": st,
         "body": body,
     }
     _append_event(store, repo_name, pr_number, ev, {"pr_state": pr_state_from_payload(pr), "pr_title": pr.get("title", "")})
-    ok = _sync_card(cfg, token_file, store, repo_name, pr_number)
+    ok = sync_card_if_published(cfg, token_file, store, repo_name, pr_number, publish_first=False)
     return ({"status": "success", "detail": "human_review"}, 200) if ok else ({"error": "Feishu send/update failed"}, 500)
 
 
@@ -408,14 +359,14 @@ def handle_issue_comment(
     if is_claude_ai_comment(body, comment):
         review_text = extract_ai_review_for_card(body)
         ev = {
-            "type": "ai_review",
+            "type": TimelineEventType.AI_REVIEW.value,
             "time": tm,
             "author": author,
             "comment_id": comment_id,
             "final_opinion": review_text,
         }
         _append_event(store, repo_name, pr_number, ev, {"pr_title": issue.get("title", "")})
-        ok = _sync_card(cfg, token_file, store, repo_name, pr_number)
+        ok = sync_card_if_published(cfg, token_file, store, repo_name, pr_number, publish_first=False)
         return ({"status": "success", "detail": "ai_review"}, 200) if ok else ({"error": "Feishu send/update failed"}, 500)
 
     plain = strip_blockquote_lines(body)
@@ -423,14 +374,14 @@ def handle_issue_comment(
         return {"status": "ignored", "reason": "empty_comment"}, 200
 
     ev = {
-        "type": "pr_comment",
+        "type": TimelineEventType.PR_COMMENT.value,
         "time": tm,
         "author": author,
         "comment_id": comment_id,
         "body": truncate_issue_comment_body(plain),
     }
     _append_event(store, repo_name, pr_number, ev, {"pr_title": issue.get("title", "")})
-    ok = _sync_card(cfg, token_file, store, repo_name, pr_number)
+    ok = sync_card_if_published(cfg, token_file, store, repo_name, pr_number, publish_first=False)
     return ({"status": "success", "detail": "pr_comment"}, 200) if ok else ({"error": "Feishu send/update failed"}, 500)
 
 

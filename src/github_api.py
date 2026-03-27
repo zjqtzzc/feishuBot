@@ -6,13 +6,19 @@ import logging
 import time
 
 import requests
+from requests.exceptions import ConnectionError, Timeout
 
 log = logging.getLogger(__name__)
-from requests.exceptions import ConnectionError, Timeout
 
 
 class GitHubAPITimeout(Exception):
     pass
+
+
+class GitHubAPIError(Exception):
+    def __init__(self, message: str, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class GitHubAPI:
@@ -51,12 +57,12 @@ class GitHubAPI:
         if r.status_code == 200:
             return r.json()
         if r.status_code == 401:
-            raise Exception("401 Unauthorized")
+            raise GitHubAPIError("401 Unauthorized", status_code=401)
         if r.status_code == 403:
-            raise Exception("403 Forbidden")
+            raise GitHubAPIError("403 Forbidden", status_code=403)
         if r.status_code == 404:
-            raise Exception("404 Not Found")
-        raise Exception(f"{r.status_code}")
+            raise GitHubAPIError("404 Not Found", status_code=404)
+        raise GitHubAPIError(str(r.status_code), status_code=r.status_code)
 
     def format_git_file_stats(self, repo_name, pr_number):
         files = self.get_pr_files(repo_name, pr_number)

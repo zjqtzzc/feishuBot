@@ -29,11 +29,11 @@ def load_config(paths: list[str] | None = None) -> Config:
                     raw = json.load(f)
             except (json.JSONDecodeError, OSError) as e:
                 raise RuntimeError(f"读取配置失败 {p}: {e}") from e
-            for f in fields(Config):
-                if f.name == "github_webhook_secret":
+            for field in fields(Config):
+                if field.name == "github_webhook_secret":
                     continue
-                if f.name not in raw:
-                    raise RuntimeError(f"配置缺少必填项: {f.name}")
+                if field.name not in raw:
+                    raise RuntimeError(f"配置缺少必填项: {field.name}")
             return Config(
                 github_webhook_port=int(raw["github_webhook_port"]),
                 github_token=raw["github_token"],
