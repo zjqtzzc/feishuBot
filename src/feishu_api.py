@@ -33,6 +33,25 @@ def send_interactive_card(
     return data.get("data", {}).get("message_id")
 
 
+def send_text_message(
+    token: str, chat_id: str, text: str, timeout: int = 10, ctx: str = ""
+) -> bool:
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json; charset=utf-8"}
+    params = {"receive_id_type": "chat_id"}
+    body = {"receive_id": chat_id, "msg_type": "text", "content": json.dumps({"text": text})}
+    p = f"{ctx} " if ctx else ""
+    t0 = time.monotonic()
+    try:
+        r = requests.post(FEISHU_MSG_URL, headers=headers, params=params, json=body, timeout=timeout)
+    except RequestException as e:
+        log.warning("%sFeishu send_text network error %.3fs %s", p, time.monotonic() - t0, e)
+        return False
+    elapsed = time.monotonic() - t0
+    data = r.json()
+    log.info("%sFeishu send_text http=%s code=%s %.3fs", p, r.status_code, data.get("code"), elapsed)
+    return data.get("code") == 0
+
+
 def patch_interactive_card(token: str, message_id: str, card: dict, timeout: int = 10, ctx: str = "") -> bool:
     url = f"{FEISHU_MSG_URL}/{message_id}"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json; charset=utf-8"}

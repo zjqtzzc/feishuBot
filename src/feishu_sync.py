@@ -14,12 +14,20 @@ from src.event_store import EventStore, pr_key
 from src.feishu_api import patch_interactive_card, send_interactive_card
 from src.feishu_card import build_timeline_card
 from src.feishu_credential import get_tenant_access_token
+from src.user_map import UserMap
 
 log = logging.getLogger(__name__)
+
+_user_map: UserMap | None = None
 
 # 同一 PR 并发 webhook（如 opened + ready_for_review、重试等）会并发 _sync_card，若都见 message_id 为空会各发一条飞书消息
 _pr_sync_locks: dict[str, threading.Lock] = {}
 _pr_sync_locks_guard = threading.Lock()
+
+
+def set_user_map(um: UserMap) -> None:
+    global _user_map
+    _user_map = um
 
 
 def _now_iso() -> str:
@@ -51,7 +59,10 @@ def _sync_card(
         log.info("%s token ok %.3fs", ctx, time.monotonic() - t0)
         if not token:
             return False
-        card = build_timeline_card(rec)
+        fm = dict(cfg.github_to_feishu)
+        if _user_map:
+            fm.update(_user_map.as_dict())
+        card = build_timeline_card(rec, feishu_map=fm)
         mid = rec.get("message_id")
         if mid:
             return patch_interactive_card(token, mid, card, ctx=ctx)

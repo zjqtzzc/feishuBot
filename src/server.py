@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
@@ -13,8 +14,11 @@ from urllib.parse import urlparse
 from src.config import load_config, project_root
 from src.event_store import EVENT_STORE_FILENAME
 from src.feishu_credential import FEISHU_TOKEN_FILENAME
+from src.feishu_ws import start_ws_client
 from src.github_api import GitHubAPI
 from src.handlers import handle
+from src.user_map import USER_MAP_FILENAME, UserMap
+from src.feishu_sync import set_user_map
 from src.webhook_logging import ctx_tag, setup_logging, strip_log_fields
 
 log = logging.getLogger(__name__)
@@ -29,11 +33,14 @@ def _setup():
     token_file = os.path.join(root, FEISHU_TOKEN_FILENAME)
     store_path = os.path.join(root, EVENT_STORE_FILENAME)
     gh = GitHubAPI(token=cfg.github_token)
-    return cfg, token_file, store_path, gh
+    user_map_file = os.path.join(root, USER_MAP_FILENAME)
+    user_map = UserMap(user_map_file)
+    set_user_map(user_map)
+    return cfg, token_file, store_path, gh, user_map
 
 
 class Handler(BaseHTTPRequestHandler):
-    cfg, token_file, store_path, github_api = _setup()
+    cfg, token_file, store_path, github_api, user_map = _setup()
 
     def do_POST(self):
         if urlparse(self.path).path not in ("/", "/webhook"):
@@ -114,6 +121,15 @@ class QuietHTTPServer(ThreadingHTTPServer):
 def main():
     setup_logging()
     port = Handler.cfg.github_webhook_port
+
+    ws_thread = threading.Thread(
+        target=start_ws_client,
+        args=(Handler.cfg, Handler.token_file, Handler.user_map),
+        daemon=True,
+        name="feishu-ws",
+    )
+    ws_thread.start()
+
     try:
         QuietHTTPServer(("0.0.0.0", port), Handler).serve_forever()
     except OSError as e:
