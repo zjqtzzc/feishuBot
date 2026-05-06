@@ -3,7 +3,7 @@
 
 import json
 import os
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, fields
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -18,7 +18,6 @@ class Config:
     app_secret: str
     chat_id: str
     github_webhook_secret: str = ""
-    github_to_feishu: dict[str, str] = field(default_factory=dict)
 
 
 def load_config(paths: list[str] | None = None) -> Config:
@@ -42,7 +41,6 @@ def load_config(paths: list[str] | None = None) -> Config:
                 app_secret=raw["app_secret"],
                 chat_id=raw["chat_id"],
                 github_webhook_secret=str(raw.get("github_webhook_secret", "")),
-                github_to_feishu=raw.get("github_to_feishu", {}),
             )
     raise FileNotFoundError(f"未找到配置文件，已尝试: {paths}")
 

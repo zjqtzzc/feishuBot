@@ -1,31 +1,23 @@
 # -*- coding: utf-8 -*-
-"""飞书 WebSocket 长链接：接收 @机器人 消息，CRUD 用户映射"""
+"""飞书 WebSocket 长链接：使用 lark-oapi SDK 接收 @机器人 消息"""
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
-import time
-from datetime import datetime, timezone
 
-try:
-    from websocket import WebSocketApp, WebSocketConnectionClosedException
-except ImportError:
-    WebSocketApp = None  # type: ignore[assignment]
+from lark_oapi.event.custom import CustomizedEvent
+from lark_oapi.event.dispatcher_handler import EventDispatcherHandler
+from lark_oapi.ws.client import Client as WsClient
 
 from src.config import Config
-from src.feishu_api import send_text_message
+from src.feishu_api import send_interactive_card, send_text_message
 from src.feishu_credential import get_tenant_access_token
 from src.user_map import UserMap
 
 log = logging.getLogger(__name__)
-
-WS_URL = "wss://open.feishu.cn/open-apis/event/v1"
-RECONNECT_INTERVAL = 60  # seconds
-TOKEN_REFRESH_SECONDS = 7000  # refresh token before expiry (~2h)
-
-_CLEAN_EXIT = False
 
 # ── 命令名常量 ──────────────────────────────────────────
 
@@ -34,6 +26,7 @@ CMD_UNBIND = "!unbind"
 CMD_LIST = "!list"
 CMD_WHOAMI = "!whoami"
 CMD_WHOIS = "!whois"
+CMD_AT = "!at"
 CMD_HELP = "!help"
 
 HELP_TEXT = (
@@ -44,6 +37,7 @@ HELP_TEXT = (
     f"  `{CMD_LIST}` — 列出所有映射\n"
     f"  `{CMD_WHOAMI}` — 查看自己的绑定\n"
     f"  `{CMD_WHOIS} @某人` — 查看某人的绑定\n"
+    f"  `{CMD_AT} <GitHub 用户名>` — 测试 @mention 效果\n"
     f"  `{CMD_HELP}` — 帮助"
 )
 
@@ -51,28 +45,45 @@ HELP_TEXT = (
 # ── 消息解析 ────────────────────────────────────────────
 
 
-def _parse_msg_content(event: dict) -> tuple[str, str, list[dict]]:
-    """返回 (text, chat_id, mentions)。mentions 是 [{"key":"@xx","open_id":"ou_xxx"}]。"""
-    msg = event.get("message") or {}
+def _strip_bot_mention(text: str) -> tuple[str, str]:
+    """去掉消息开头的 @机器人 前缀，返回 (清洗后文本, 被去掉的 bot_key)。"""
+    m = re.match(r"^@(\S+)\s*", text)
+    if m:
+        return text[m.end():].strip(), f"@{m.group(1)}"
+    return text, ""
+
+
+def _parse_msg_content(event_data: dict) -> tuple[str, str, bool, list[dict]]:
+    """返回 (text, chat_id, is_group, mentions)。群聊需 @机器人 才响应。"""
+    msg = event_data.get("message") or {}
     chat_id = msg.get("chat_id", "")
+    chat_type = msg.get("chat_type", "")
+    is_group = chat_type == "group"
     content_str = msg.get("content", "{}")
     try:
         content = json.loads(content_str)
     except (json.JSONDecodeError, TypeError):
-        return "", chat_id, []
-    text = content.get("text", "").strip()
+        return "", chat_id, is_group, []
+    raw_text = content.get("text", "").strip()
+    # 群聊必须 @机器人 才响应；单聊随便
+    if is_group and not raw_text.startswith("@"):
+        return "", chat_id, is_group, []
+    text, bot_key = _strip_bot_mention(raw_text) if raw_text.startswith("@") else (raw_text, "")
     mentions_raw = msg.get("mentions") or []
     mentions: list[dict] = []
     for m in mentions_raw:
+        key = m.get("key", "")
+        if bot_key and key == bot_key:
+            continue  # 过滤掉机器人自身
         mentions.append({
-            "key": m.get("key", ""),
+            "key": key,
             "open_id": (m.get("id") or {}).get("open_id", ""),
         })
-    return text, chat_id, mentions
+    return text, chat_id, is_group, mentions
 
 
-def _sender_open_id(event: dict) -> str:
-    return (event.get("sender") or {}).get("sender_id", {}).get("open_id", "")
+def _sender_open_id(event_data: dict) -> str:
+    return (event_data.get("sender") or {}).get("sender_id", {}).get("open_id", "")
 
 
 # ── 命令处理 ────────────────────────────────────────────
@@ -98,7 +109,6 @@ def _dispatch(
     cmd = parts[0].lower()
     args = parts[1:]
 
-    # !bind <gh_name> [@someone] — 如果消息里 @了人则绑定被 @者，否则绑定发送者
     if cmd == CMD_BIND:
         if not args:
             send_text_message(token, chat_id, "用法: `!bind <GitHub 用户名> [@某人]`", ctx="cmd")
@@ -113,7 +123,6 @@ def _dispatch(
             user_map.bind(gh_name, sender_open_id)
             send_text_message(token, chat_id, f"已将你绑定到 GitHub 用户 `{gh_name}`", ctx="cmd")
 
-    # !unbind <gh_name>
     elif cmd == CMD_UNBIND:
         if not args:
             send_text_message(token, chat_id, "用法: `!unbind <GitHub 用户名>`", ctx="cmd")
@@ -125,7 +134,6 @@ def _dispatch(
         else:
             send_text_message(token, chat_id, f"未找到 `{gh_name}` 的绑定", ctx="cmd")
 
-    # !list
     elif cmd == CMD_LIST:
         all_items = user_map.list_all()
         if not all_items:
@@ -136,7 +144,6 @@ def _dispatch(
             lines.append(f"  `{gh}` → `{oid}`")
         send_text_message(token, chat_id, "\n".join(lines), ctx="cmd")
 
-    # !whoami
     elif cmd == CMD_WHOAMI:
         gh = user_map.find_by_open_id(sender_open_id)
         if gh:
@@ -144,7 +151,6 @@ def _dispatch(
         else:
             send_text_message(token, chat_id, "你尚未绑定 GitHub 用户，使用 `!bind <用户名>` 绑定", ctx="cmd")
 
-    # !whois @某人
     elif cmd == CMD_WHOIS:
         if not mentions:
             send_text_message(token, chat_id, "用法: `!whois @某人`", ctx="cmd")
@@ -156,92 +162,72 @@ def _dispatch(
         else:
             send_text_message(token, chat_id, f"{mentions[0]['key']} 尚未绑定", ctx="cmd")
 
-    # !help
+    elif cmd == CMD_AT:
+        if not args:
+            send_text_message(token, chat_id, "用法: `!at <GitHub 用户名>`", ctx="cmd")
+            return
+        gh_name = args[0]
+        fid = user_map.find_by_github(gh_name)
+        if fid:
+            card = {
+                "header": {
+                    "template": "blue",
+                    "title": {"content": "@mention 测试", "tag": "plain_text"},
+                },
+                "elements": [
+                    {
+                        "tag": "div",
+                        "text": {
+                            "tag": "lark_md",
+                            "content": f"<at id={fid}>{gh_name}</at>",
+                        },
+                    }
+                ],
+            }
+            send_interactive_card(token, chat_id, card, ctx="cmd")
+        else:
+            send_text_message(token, chat_id, f"未找到 `{gh_name}` 的绑定", ctx="cmd")
+
     elif cmd == CMD_HELP:
         send_text_message(token, chat_id, HELP_TEXT, ctx="cmd")
 
     else:
         log.debug("Unknown command: %s", cmd)
+        send_text_message(token, chat_id, f"未知命令 `{cmd}`\n\n{HELP_TEXT}", ctx="cmd")
 
 
-# ── WebSocket 事件处理 ───────────────────────────────────
+# ── 事件回调 ────────────────────────────────────────────
 
 
-def _handle_event(data: dict, user_map: UserMap, cfg: Config, token_file: str) -> None:
-    header = data.get("header") or {}
-    event_type = header.get("event_type", "")
-    event = data.get("event") or {}
-
-    if event_type == "im.message.receive_v1":
-        text, chat_id, mentions = _parse_msg_content(event)
-        sender_oid = _sender_open_id(event)
+def _make_event_handler(user_map: UserMap, cfg: Config, token_file: str) -> EventDispatcherHandler:
+    def on_im_message(event: CustomizedEvent) -> None:
+        event_data = event.event or {}
+        text, chat_id, _is_group, mentions = _parse_msg_content(event_data)
+        sender_oid = _sender_open_id(event_data)
         if text and chat_id:
             log.info("WS message: chat=%s sender=%s text=%s", chat_id[:12], sender_oid[:12], text[:60])
             _dispatch(text, chat_id, sender_oid, mentions, user_map, cfg, token_file)
-    else:
-        log.debug("WS event ignored: %s", event_type)
+
+    _noop = lambda _: None
+    return (
+        EventDispatcherHandler
+        .builder("", "")  # WebSocket 不需要 encrypt_key / verification_token
+        .register_p2_customized_event("im.message.receive_v1", on_im_message)
+        .register_p2_customized_event("im.chat.access_event.bot_p2p_chat_entered_v1", _noop)
+        .build()
+    )
 
 
-def _on_message(ws, message: str, user_map: UserMap, cfg: Config, token_file: str) -> None:
-    try:
-        data = json.loads(message)
-    except json.JSONDecodeError:
-        log.warning("WS non-JSON message")
-        return
-
-    # 应用层 ping
-    if isinstance(data, dict) and data.get("type") == "ping":
-        try:
-            ws.send(json.dumps({"type": "pong"}))
-        except Exception as e:
-            log.debug("WS pong send failed: %s", e)
-        return
-
-    _handle_event(data, user_map, cfg, token_file)
+# ── 线程入口 ────────────────────────────────────────────
 
 
 def start_ws_client(cfg: Config, token_file: str, user_map: UserMap) -> None:
-    """阻塞运行 WebSocket 客户端，掉线自动重连。应在独立线程中调用。"""
-    if WebSocketApp is None:
-        log.error("websocket-client not installed, run: pip install websocket-client")
-        return
-
-    global _CLEAN_EXIT
-    _token_refreshed_at = 0.0
-
-    def on_open(ws):
-        nonlocal _token_refreshed_at
-        token = get_tenant_access_token(cfg.app_id, cfg.app_secret, token_file)
-        if not token:
-            log.error("WS cannot get token, closing")
-            ws.close()
-            return
-        auth_msg = json.dumps({"type": "token", "token": token})
-        ws.send(auth_msg)
-        _token_refreshed_at = time.monotonic()
-        log.info("WS connected and authenticated")
-
-    def on_message(ws, message):
-        _on_message(ws, message, user_map, cfg, token_file)
-
-    def on_error(ws, error):
-        log.error("WS error: %s", error)
-
-    def on_close(ws, close_status_code, close_msg):
-        log.warning("WS closed code=%s msg=%s", close_status_code, close_msg)
-
-    while not _CLEAN_EXIT:
-        ws = WebSocketApp(WS_URL, on_open=on_open, on_message=on_message, on_error=on_error, on_close=on_close)
-        try:
-            ws.run_forever()
-        except Exception as e:
-            log.error("WS run_forever exception: %s", e)
-        if _CLEAN_EXIT:
-            break
-        log.info("WS disconnected, reconnecting in %ds...", RECONNECT_INTERVAL)
-        time.sleep(RECONNECT_INTERVAL)
-
-
-def stop_ws_client() -> None:
-    global _CLEAN_EXIT
-    _CLEAN_EXIT = True
+    """启动 WebSocket 客户端（阻塞）。应在独立线程中调用。"""
+    event_handler = _make_event_handler(user_map, cfg, token_file)
+    client = WsClient(
+        app_id=cfg.app_id,
+        app_secret=cfg.app_secret,
+        event_handler=event_handler,
+        auto_reconnect=True,
+    )
+    client.start()

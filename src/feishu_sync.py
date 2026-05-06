@@ -59,9 +59,7 @@ def _sync_card(
         log.info("%s token ok %.3fs", ctx, time.monotonic() - t0)
         if not token:
             return False
-        fm = dict(cfg.github_to_feishu)
-        if _user_map:
-            fm.update(_user_map.as_dict())
+        fm = _user_map.as_dict() if _user_map else {}
         card = build_timeline_card(rec, feishu_map=fm)
         mid = rec.get("message_id")
         if mid:

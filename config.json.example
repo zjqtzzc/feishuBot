@@ -4,6 +4,5 @@
   "github_webhook_secret": "",
   "app_id": "your-feishu-app-id",
   "app_secret": "your-feishu-app-secret",
-  "chat_id": "oc_xxx",
-  "github_to_feishu": {}
+  "chat_id": "oc_xxx"
 }

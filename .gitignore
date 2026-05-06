@@ -6,6 +6,7 @@ config.backup.json
 .pr_message_map
 .pr_event_store
 .feishu_token
+.user_map.json
 *.log
 github-feishu-bot.log*
 __pycache__/
