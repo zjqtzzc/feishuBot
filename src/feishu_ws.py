@@ -42,6 +42,9 @@ HELP_TEXT = (
 )
 
 
+# 群聊中不应响应的 @ 前缀
+_SKIP_MENTIONS = frozenset({"@所有人"})
+
 # ── 消息解析 ────────────────────────────────────────────
 
 
@@ -65,11 +68,16 @@ def _parse_msg_content(event_data: dict) -> tuple[str, str, bool, list[dict]]:
     except (json.JSONDecodeError, TypeError):
         return "", chat_id, is_group, []
     raw_text = content.get("text", "").strip()
-    # 群聊必须 @机器人 才响应；单聊随便
-    if is_group and not raw_text.startswith("@"):
-        return "", chat_id, is_group, []
-    text, bot_key = _strip_bot_mention(raw_text) if raw_text.startswith("@") else (raw_text, "")
     mentions_raw = msg.get("mentions") or []
+    # 群聊必须 @机器人（而非 @所有人）才响应；单聊随便
+    if is_group:
+        if not raw_text.startswith("@"):
+            return "", chat_id, is_group, []
+        text, bot_key = _strip_bot_mention(raw_text)
+        if bot_key in _SKIP_MENTIONS:
+            return "", chat_id, is_group, []
+    else:
+        text, bot_key = raw_text, ""
     mentions: list[dict] = []
     for m in mentions_raw:
         key = m.get("key", "")

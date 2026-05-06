@@ -46,6 +46,7 @@ copy_project() {
         --exclude="$(basename "$install_dir")" \
         --exclude='.pr_event_store' \
         --exclude='.feishu_token' \
+        --exclude='.user_map.json' \
         "$script_dir/" "$install_dir/"
 }
 
