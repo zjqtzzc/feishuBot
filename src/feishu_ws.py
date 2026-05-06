@@ -24,22 +24,32 @@ log = logging.getLogger(__name__)
 CMD_BIND = "!bind"
 CMD_UNBIND = "!unbind"
 CMD_LIST = "!list"
-CMD_WHOAMI = "!whoami"
-CMD_WHOIS = "!whois"
 CMD_AT = "!at"
 CMD_HELP = "!help"
 
-HELP_TEXT = (
-    "UserMap 命令：\n"
-    f"  `{CMD_BIND} <GitHub 用户名>`   — 将自己绑定到 GitHub 用户\n"
-    f"  `{CMD_BIND} <GitHub 用户名> @某人` — 将 @某人 绑定到 GitHub 用户\n"
-    f"  `{CMD_UNBIND} <GitHub 用户名>` — 删除绑定\n"
-    f"  `{CMD_LIST}` — 列出所有映射\n"
-    f"  `{CMD_WHOAMI}` — 查看自己的绑定\n"
-    f"  `{CMD_WHOIS} @某人` — 查看某人的绑定\n"
-    f"  `{CMD_AT} <GitHub 用户名>` — 测试 @mention 效果\n"
-    f"  `{CMD_HELP}` — 帮助"
-)
+HELP_CARD = {
+    "header": {"template": "blue", "title": {"content": "UserMap 命令", "tag": "plain_text"}},
+    "elements": [
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": (
+                    f"**{CMD_BIND}** `<用户名>`\n"
+                    f"将自己绑定到 GitHub 用户\n\n"
+                    f"**{CMD_BIND}** `<用户名>` @某人\n"
+                    f"将 @某人 绑定到 GitHub 用户\n\n"
+                    f"**{CMD_UNBIND}** `<用户名>`\n"
+                    f"删除绑定\n\n"
+                    f"**{CMD_LIST}**\n"
+                    f"列出所有映射\n\n"
+                    f"**{CMD_AT}** `<用户名>`\n"
+                    f"测试 @mention 效果"
+                ),
+            },
+        },
+    ],
+}
 
 
 # 群聊中不应响应的 @ 前缀
@@ -85,6 +95,7 @@ def _parse_msg_content(event_data: dict) -> tuple[str, str, bool, list[dict]]:
             continue  # 过滤掉机器人自身
         mentions.append({
             "key": key,
+            "name": m.get("name", ""),
             "open_id": (m.get("id") or {}).get("open_id", ""),
         })
     return text, chat_id, is_group, mentions
@@ -124,7 +135,7 @@ def _dispatch(
         gh_name = args[0]
         if mentions:
             target_open_id = mentions[0]["open_id"]
-            target_name = mentions[0]["key"]
+            target_name = mentions[0].get("name") or mentions[0]["key"]
             user_map.bind(gh_name, target_open_id)
             send_text_message(token, chat_id, f"已将 {target_name} 绑定到 GitHub 用户 `{gh_name}`", ctx="cmd")
         else:
@@ -151,24 +162,6 @@ def _dispatch(
         for gh, oid in all_items.items():
             lines.append(f"  `{gh}` → `{oid}`")
         send_text_message(token, chat_id, "\n".join(lines), ctx="cmd")
-
-    elif cmd == CMD_WHOAMI:
-        gh = user_map.find_by_open_id(sender_open_id)
-        if gh:
-            send_text_message(token, chat_id, f"你是 `{gh}`", ctx="cmd")
-        else:
-            send_text_message(token, chat_id, "你尚未绑定 GitHub 用户，使用 `!bind <用户名>` 绑定", ctx="cmd")
-
-    elif cmd == CMD_WHOIS:
-        if not mentions:
-            send_text_message(token, chat_id, "用法: `!whois @某人`", ctx="cmd")
-            return
-        target_open_id = mentions[0]["open_id"]
-        gh = user_map.find_by_open_id(target_open_id)
-        if gh:
-            send_text_message(token, chat_id, f"{mentions[0]['key']} 是 `{gh}`", ctx="cmd")
-        else:
-            send_text_message(token, chat_id, f"{mentions[0]['key']} 尚未绑定", ctx="cmd")
 
     elif cmd == CMD_AT:
         if not args:
@@ -197,11 +190,11 @@ def _dispatch(
             send_text_message(token, chat_id, f"未找到 `{gh_name}` 的绑定", ctx="cmd")
 
     elif cmd == CMD_HELP:
-        send_text_message(token, chat_id, HELP_TEXT, ctx="cmd")
+        send_interactive_card(token, chat_id, HELP_CARD, ctx="cmd")
 
     else:
         log.debug("Unknown command: %s", cmd)
-        send_text_message(token, chat_id, f"未知命令 `{cmd}`\n\n{HELP_TEXT}", ctx="cmd")
+        send_text_message(token, chat_id, f"未知命令 `{cmd}`，输入 `!help` 查看可用命令", ctx="cmd")
 
 
 # ── 事件回调 ────────────────────────────────────────────
