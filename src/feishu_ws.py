@@ -129,7 +129,7 @@ def _dispatch(
         if not all_items:
             send_text_message(token, chat_id, "当前无绑定", ctx="cmd")
             return
-        # 旧绑定或绑定时没取到名字的，按卡片群（config 的 chat_id）成员补全；单聊里只有自己和机器人
+        # 绑定时没取到名字的，按卡片群（config 的 chat_id）成员补全；单聊里只有自己和机器人
         if any(not v.get("name") for v in all_items.values()):
             user_map.set_names(get_chat_member_names(token, cfg.chat_id, ctx="cmd"))
             all_items = user_map.list_all()

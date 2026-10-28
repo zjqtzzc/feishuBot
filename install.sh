@@ -43,12 +43,6 @@ run_group=$(id -gn "$run_user")
 unit_file="/etc/systemd/system/$SERVICE.service"
 data="$base/data"
 
-# 旧版布局：代码、venv 软链接、配置和数据都直接放在安装目录下
-LEGACY_DATA=(config.json .pr_event_store .user_map.json)
-LEGACY_CODE=(app.py src requirements.txt config.json.example .gitignore install.sh setup.sh uninstall.sh venv)
-
-is_legacy() { [[ -f "$base/app.py" ]]; }
-
 check_dependencies() {
     command -v python3 &> /dev/null || die "未安装 python3: sudo apt install python3"
     python3 -c 'import sys; sys.exit(sys.version_info < (3, 10))' || die "需要 Python 3.10 及以上"
@@ -87,28 +81,21 @@ prepare_venv() {
     touch "$new_venv/.ok"
 }
 
-# 找到当前生效的配置目录：新布局 data/，旧布局安装目录本身；都没有则生成模板并退出
-config_dir() {
-    if [[ -f "$data/config.json" ]]; then
-        echo "$data"
-    elif is_legacy && [[ -f "$base/config.json" ]]; then
-        echo "$base"
-    else
-        mkdir -p "$data"
-        cp "$base/app.new/config.json.example" "$data/config.json"
-        chown -R "$run_user:$run_group" "$data"
-        chmod 600 "$data/config.json"
-        die "已生成 $data/config.json，请填写实际配置后重新运行本脚本"
-    fi
+# 首次安装没有配置：生成模板并退出
+ensure_config() {
+    [[ -f "$data/config.json" ]] && return 0
+    mkdir -p "$data"
+    cp "$base/app.new/config.json.example" "$data/config.json"
+    chown -R "$run_user:$run_group" "$data"
+    chmod 600 "$data/config.json"
+    die "已生成 $data/config.json，请填写实际配置后重新运行本脚本"
 }
 
 validate() {
     log_info "验证新代码与配置..."
-    local cfg_dir
-    cfg_dir=$(config_dir)
-    (cd "$base/app.new" && BOT_DATA_DIR="$cfg_dir" "$new_venv/bin/python" -c "import app") \
+    (cd "$base/app.new" && BOT_DATA_DIR="$data" "$new_venv/bin/python" -c "import app") \
         || die "新版本验证失败（见上方报错），线上服务未做任何改动"
-    check_port_owner "$cfg_dir/config.json"
+    check_port_owner "$data/config.json"
 }
 
 config_port() {
@@ -132,27 +119,6 @@ stop_service() {
         log_info "停止服务..."
         systemctl stop "$SERVICE" 2>/dev/null || true
     fi
-}
-
-migrate_legacy() {
-    is_legacy || return 0
-    log_info "迁移旧版布局：数据移到 data/，旧代码移到 app.prev/"
-    mkdir -p "$data"
-    local f
-    for f in "${LEGACY_DATA[@]}"; do
-        [[ -e "$base/$f" ]] && mv "$base/$f" "$data/$f"
-    done
-    rm -f "$base/.feishu_token"
-    rm -rf "$base/app.prev" "$base/__pycache__"
-    mkdir -p "$base/app.prev"
-    for f in "${LEGACY_CODE[@]}"; do
-        # venv 是指向源码目录的软链接，只删链接本身
-        if [[ -L "$base/$f" ]]; then
-            rm -f "$base/$f"
-        elif [[ -e "$base/$f" ]]; then
-            mv "$base/$f" "$base/app.prev/"
-        fi
-    done
 }
 
 switch_code() {
@@ -252,9 +218,9 @@ main() {
     log_info "安装 / 升级 GitHub PR to Feishu Bot 到 $base"
     stage_code
     prepare_venv
+    ensure_config
     validate
     stop_service
-    migrate_legacy
     switch_code
     write_unit
     if ! start_and_check; then
