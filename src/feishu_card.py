@@ -162,45 +162,63 @@ def summarize_files(files: list[dict[str, Any]]) -> list[tuple[str, int, int, in
 
 
 def _short_path(path: str) -> str:
-    """层级太深时省略中间：a/b/c/d/e/ → a/…/d/e/"""
+    """超过 3 层时只保留第一层和最后一段：a/b/c/d/ → a/…/d/，保证一行放得下"""
     is_dir = path.endswith("/")
     parts = path.rstrip("/").split("/")
-    if len(parts) > 4:
-        parts = [parts[0], "…", *parts[-2:]]
+    if len(parts) > 3:
+        parts = [parts[0], "…", parts[-1]]
     return "/".join(parts) + ("/" if is_dir else "")
 
 
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}" if n == 1 else f"{n} {word}s"
+
+
+def _file_row(path: str, adds: int, dels: int, count: int) -> dict:
+    """一行改动：左栏路径（多文件时附文件数），右栏增删，分栏保证各行数字对齐。"""
+    name = path if path.startswith("其他 ") else _short_path(path)
+    if count > 1:
+        name += f" ({count})"
+    stat = f"<font color='green'>+{adds}</font> <font color='red'>-{dels}</font>"
+    return {
+        "tag": "column_set",
+        "flex_mode": "none",
+        "horizontal_spacing": "8px",
+        "columns": [
+            {"tag": "column", "width": "weighted", "weight": 4,
+             "elements": [{"tag": "markdown", "content": _grey(name), "text_size": "notation"}]},
+            {"tag": "column", "width": "auto",
+             "elements": [{"tag": "markdown", "content": stat, "text_size": "notation", "text_align": "right"}]},
+        ],
+    }
+
+
 def _files_panel(pr: dict[str, Any], files: list[dict[str, Any]] | None, errors: dict[str, int]) -> dict:
-    """折叠面板：标题为改动合计，展开后为按目录汇总的表格。"""
+    """折叠面板：标题为改动合计，展开后每个目录一行。"""
     if "changed_files" in pr:
         title = (
-            f"{pr['changed_files']} files <font color='green'>+{pr.get('additions', 0)}</font> "
-            f"<font color='red'>-{pr.get('deletions', 0)}</font> · {pr.get('commits', 0)} commits"
+            f"{_plural(pr['changed_files'], 'file')} <font color='green'>+{pr.get('additions', 0)}</font> "
+            f"<font color='red'>-{pr.get('deletions', 0)}</font> · {_plural(pr.get('commits', 0), 'commit')}"
         )
     else:
         title = "改动文件"
     if files is None:
-        content = _no_access("改动文件", errors.get("files") or errors.get("pr", 0))
+        rows = [_markdown([_no_access("改动文件", errors.get("files") or errors.get("pr", 0))], "notation")]
     elif not files:
-        content = _grey("没有改动文件")
+        rows = [_markdown([_grey("没有改动文件")], "notation")]
     else:
-        lines = ["| 路径 | 文件 | 改动 |", "| --- | --- | --- |"]
-        for path, adds, dels, count in summarize_files(files):
-            name = path if path.startswith("其他 ") else f"`{_short_path(path)}`"
-            lines.append(
-                f"| {name} | {count} | <font color='green'>+{adds}</font> <font color='red'>-{dels}</font> |"
-            )
-        content = "\n".join(lines)
+        rows = [_file_row(*row) for row in summarize_files(files)]
     return {
         "tag": "collapsible_panel",
         "expanded": False,
+        "vertical_spacing": "2px",
         "header": {
             "title": {"tag": "markdown", "content": title},
             "icon": {"tag": "standard_icon", "token": "down-small-ccm_outlined", "size": "16px 16px"},
             "icon_position": "follow_text",
             "icon_expanded_angle": -180,
         },
-        "elements": [{"tag": "markdown", "content": content, "text_size": "notation"}],
+        "elements": rows,
     }
 
 
@@ -244,7 +262,7 @@ def build_status_card(
     meta: list[str] = []
     if state in ("merged", "closed"):
         who = f"{(pr.get('merged_by') or {}).get('login', '')} merged" if state == "merged" else "Closed"
-        parts = [who, f"{pr.get('commits', 0)} commits"]
+        parts = [who, _plural(pr.get("commits", 0), "commit")]
         if ai:
             parts.append(f"AI review {len(ai)} 轮")
         meta.append(f"{_grey(' · '.join(parts))} · [查看 PR]({url})")
