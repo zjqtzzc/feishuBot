@@ -27,6 +27,16 @@ class Trigger:
     pr: dict[str, Any] | None = None
 
 
+@dataclass
+class Result:
+    code: int
+    # 成功时为 queued / ignored，失败时为错误信息
+    status: str
+    # 仅用于日志：被忽略的原因等
+    detail: str = ""
+    trigger: Trigger | None = None
+
+
 def verify_signature(payload: bytes, sig: str, secret: str) -> bool:
     if not secret:
         return True
@@ -97,20 +107,19 @@ def handle(
     event_type: str,
     data: dict[str, Any] | None,
     cfg: Config,
-) -> tuple[dict, int, Trigger | None]:
-    """返回 (响应 body, HTTP 状态码, 需要刷新的卡片)。"""
+) -> Result:
     if event_type not in HANDLED_EVENTS:
-        return {"status": "ignored", "event": event_type or "unknown"}, 200, None
+        return Result(200, "ignored", event_type or "unknown")
     if not data:
-        return {"error": "Empty payload"}, 400, None
+        return Result(400, "Empty payload")
     if not verify_signature(payload, sig, cfg.github_webhook_secret):
-        return {"error": "Invalid signature"}, 401, None
+        return Result(401, "Invalid signature")
 
     repo = (data.get("repository") or {}).get("full_name", "")
     if event_type == "issue_comment":
         issue = data.get("issue") or {}
-        if not issue.get("pull_request"):
-            return {"status": "ignored", "reason": "not_a_pr"}, 200, None
+        if "pull_request" not in issue:
+            return Result(200, "ignored", "not_a_pr")
         number = int(issue.get("number") or 0)
         handled, activity = _comment_activity(data)
     else:
@@ -122,8 +131,8 @@ def handle(
             handled, activity = _review_activity(data)
 
     if not handled:
-        return {"status": "ignored", "action": data.get("action") or "unknown"}, 200, None
+        return Result(200, "ignored", data.get("action") or "unknown")
     if not repo or not number:
-        return {"error": "Missing repo/pr"}, 400, None
+        return Result(400, "Missing repo/pr")
     pr = data.get("pull_request") if event_type == "pull_request" else None
-    return {"status": "queued"}, 200, Trigger(repo, number, activity, pr)
+    return Result(200, "queued", trigger=Trigger(repo, number, activity, pr))

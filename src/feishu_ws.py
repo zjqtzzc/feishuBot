@@ -6,7 +6,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-import threading
 
 from lark_oapi.event.custom import CustomizedEvent
 from lark_oapi.event.dispatcher_handler import EventDispatcherHandler
@@ -24,7 +23,6 @@ log = logging.getLogger(__name__)
 CMD_BIND = "!bind"
 CMD_UNBIND = "!unbind"
 CMD_LIST = "!list"
-CMD_AT = "!at"
 CMD_HELP = "!help"
 
 HELP_CARD = {
@@ -42,9 +40,7 @@ HELP_CARD = {
                     f"**{CMD_UNBIND}** `<用户名>`\n"
                     f"删除绑定\n\n"
                     f"**{CMD_LIST}**\n"
-                    f"列出所有映射\n\n"
-                    f"**{CMD_AT}** `<用户名>`\n"
-                    f"测试 @mention 效果"
+                    f"列出所有映射"
                 ),
             },
         },
@@ -66,8 +62,8 @@ def _strip_bot_mention(text: str) -> tuple[str, str]:
     return text, ""
 
 
-def _parse_msg_content(event_data: dict) -> tuple[str, str, bool, list[dict]]:
-    """返回 (text, chat_id, is_group, mentions)。群聊需 @机器人 才响应。"""
+def _parse_msg_content(event_data: dict) -> tuple[str, str, list[dict]]:
+    """返回 (text, chat_id, mentions)。群聊需 @机器人 才响应。"""
     msg = event_data.get("message") or {}
     chat_id = msg.get("chat_id", "")
     chat_type = msg.get("chat_type", "")
@@ -76,16 +72,16 @@ def _parse_msg_content(event_data: dict) -> tuple[str, str, bool, list[dict]]:
     try:
         content = json.loads(content_str)
     except (json.JSONDecodeError, TypeError):
-        return "", chat_id, is_group, []
+        return "", chat_id, []
     raw_text = content.get("text", "").strip()
     mentions_raw = msg.get("mentions") or []
     # 群聊必须 @机器人（而非 @所有人）才响应；单聊随便
     if is_group:
         if not raw_text.startswith("@"):
-            return "", chat_id, is_group, []
+            return "", chat_id, []
         text, bot_key = _strip_bot_mention(raw_text)
         if bot_key in _SKIP_MENTIONS:
-            return "", chat_id, is_group, []
+            return "", chat_id, []
     else:
         text, bot_key = raw_text, ""
     mentions: list[dict] = []
@@ -98,7 +94,7 @@ def _parse_msg_content(event_data: dict) -> tuple[str, str, bool, list[dict]]:
             "name": m.get("name", ""),
             "open_id": (m.get("id") or {}).get("open_id", ""),
         })
-    return text, chat_id, is_group, mentions
+    return text, chat_id, mentions
 
 
 def _sender_open_id(event_data: dict) -> str:
@@ -167,32 +163,6 @@ def _dispatch(
             lines.append(f"  {gh} → {v.get('name') or '（未知飞书用户）'}")
         send_text_message(token, chat_id, "\n".join(lines), ctx="cmd")
 
-    elif cmd == CMD_AT:
-        if not args:
-            send_text_message(token, chat_id, "用法: `!at <GitHub 用户名>`", ctx="cmd")
-            return
-        gh_name = args[0]
-        fid = user_map.find_by_github(gh_name)
-        if fid:
-            card = {
-                "header": {
-                    "template": "blue",
-                    "title": {"content": "@mention 测试", "tag": "plain_text"},
-                },
-                "elements": [
-                    {
-                        "tag": "div",
-                        "text": {
-                            "tag": "lark_md",
-                            "content": f"<at id={fid}>{gh_name}</at>",
-                        },
-                    }
-                ],
-            }
-            send_interactive_card(token, chat_id, card, ctx="cmd")
-        else:
-            send_text_message(token, chat_id, f"未找到 `{gh_name}` 的绑定", ctx="cmd")
-
     elif cmd == CMD_HELP:
         send_interactive_card(token, chat_id, HELP_CARD, ctx="cmd")
 
@@ -207,7 +177,7 @@ def _dispatch(
 def _make_event_handler(user_map: UserMap, cfg: Config) -> EventDispatcherHandler:
     def on_im_message(event: CustomizedEvent) -> None:
         event_data = event.event or {}
-        text, chat_id, _is_group, mentions = _parse_msg_content(event_data)
+        text, chat_id, mentions = _parse_msg_content(event_data)
         sender_oid = _sender_open_id(event_data)
         if text and chat_id:
             log.info("WS message: chat=%s sender=%s text=%s", chat_id[:12], sender_oid[:12], text[:60])

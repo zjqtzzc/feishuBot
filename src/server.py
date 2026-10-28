@@ -17,7 +17,7 @@ from src.feishu_ws import start_ws_client
 from src.github_api import GitHubAPI
 from src.handlers import HANDLED_EVENTS, handle
 from src.user_map import USER_MAP_FILENAME, UserMap
-from src.webhook_logging import ctx_tag, setup_logging, strip_log_fields
+from src.webhook_logging import ctx_tag, setup_logging
 from src.worker import CardWorker
 
 log = logging.getLogger(__name__)
@@ -61,36 +61,28 @@ class Handler(BaseHTTPRequestHandler):
 
         tag, gh_action = ctx_tag(event_type, data)
         t0 = time.monotonic()
-        body, code, trigger = handle(
+        res = handle(
             raw,
             self.headers.get("X-Hub-Signature-256", ""),
             event_type,
             data,
             self.cfg,
         )
-        if trigger:
-            self.worker.submit(trigger)
+        if res.trigger:
+            self.worker.submit(res.trigger)
         elapsed = time.monotonic() - t0
-        status = body.get("status") or body.get("error", "")
-        detail = body.get("detail", "")
-        if detail:
-            tail = detail
-        elif status == "ignored":
-            tail = body.get("reason") or body.get("action") or body.get("event") or "-"
-        else:
-            tail = "-"
         log.info(
             "[%s] %s action=%s -> HTTP %s %s %s %.3fs delivery=%s",
             tag,
             event_type,
             gh_action or "-",
-            code,
-            status,
-            tail,
+            res.code,
+            res.status,
+            res.detail or "-",
             elapsed,
             delivery or "-",
         )
-        self._json(code, strip_log_fields(body))
+        self._json(res.code, {"status" if res.code == 200 else "error": res.status})
 
     def _json(self, status: int, body: dict):
         b = json.dumps(body).encode("utf-8")

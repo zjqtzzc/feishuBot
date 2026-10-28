@@ -69,18 +69,6 @@ class UserMap:
             if changed:
                 self._save()
 
-    def find_by_open_id(self, open_id: str) -> str | None:
-        with self._lock:
-            for gh, v in self._data.items():
-                if v["open_id"] == open_id:
-                    return gh
-            return None
-
-    def find_by_github(self, github_name: str) -> str | None:
-        with self._lock:
-            v = self._data.get(github_name)
-            return v["open_id"] if v else None
-
     def list_all(self) -> dict[str, dict[str, str]]:
         with self._lock:
             return {gh: dict(v) for gh, v in self._data.items()}
