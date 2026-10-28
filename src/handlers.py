@@ -87,7 +87,7 @@ def _comment_activity(data: dict[str, Any]) -> tuple[bool, str | None]:
     comment = data.get("comment") or {}
     user = (comment.get("user") or {}).get("login", "")
     if is_ai_comment(comment):
-        return True, "🤖 AI review 已更新"
+        return True, "AI review 已更新"
     return True, f"**{user}** commented"
 
 

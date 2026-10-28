@@ -13,7 +13,7 @@ TEMPLATE = {"open": "red", "draft": "grey", "merged": "green", "closed": "grey"}
 # GitHub Actions 机器人登录名：AI review 由它以 issue comment 发出
 GITHUB_ACTIONS_LOGINS = frozenset({"github-actions[bot]", "github-actions"})
 
-AI_FORMAT_ERROR = "⚠️ AI Review 格式匹配失败，请查看 GitHub 原文"
+AI_FORMAT_ERROR = "AI Review 格式匹配失败，请查看 GitHub 原文"
 
 CST = timezone(timedelta(hours=8))
 
@@ -64,7 +64,7 @@ def pr_state(pr: dict[str, Any]) -> str:
 
 
 def _no_access(what: str, status: int) -> str:
-    return f"⚠️ 无法读取{what}（HTTP {status}，请检查 GitHub token 权限）"
+    return f"<font color='red'>无法读取{what}（HTTP {status}，请检查 GitHub token 权限）</font>"
 
 
 def _review_line(pr: dict[str, Any], reviews: list[dict[str, Any]] | None, fm: dict[str, str]) -> str:
@@ -80,10 +80,12 @@ def _review_line(pr: dict[str, Any], reviews: list[dict[str, Any]] | None, fm: d
     pending = [u for u in pending if u not in verdict]
     teams = [f"team/{t.get('slug') or t.get('name')}" for t in pr.get("requested_teams") or []]
 
-    parts = [f"👀 {_fmt_user(u, fm)}" for u in pending]
-    parts += [f"👀 **{t}**" for t in teams]
-    parts += [f"{'✅' if st == 'APPROVED' else '❌'} {_fmt_user(u, fm)}" for u, st in verdict.items()]
-    return "  ".join(parts)
+    parts = [f"{_fmt_user(u, fm)} 待审" for u in pending]
+    parts += [f"**{t}** 待审" for t in teams]
+    parts += [
+        f"{_fmt_user(u, fm)} {'approved' if st == 'APPROVED' else 'requested changes'}" for u, st in verdict.items()
+    ]
+    return " · ".join(parts)
 
 
 def _fmt_time(ts: float) -> str:
@@ -132,26 +134,26 @@ def build_status_card(
         lines.append(f"{repo} · **{author}** · `{head}` → `{base}`")
         if "changed_files" in pr:
             lines.append(
-                f"📁 {pr['changed_files']} files "
+                f"{pr['changed_files']} files "
                 f"<font color='green'>+{pr.get('additions', 0)}</font> "
                 f"<font color='red'>-{pr.get('deletions', 0)}</font> · {pr.get('commits', 0)} commits"
             )
         else:
-            lines.append("📁 ⚠️ 无法读取改动统计")
+            lines.append(_no_access("改动统计", errors.get("pr", 0)))
         review_line = _review_line(pr, reviews, fm)
         if reviews is None:
             warn = _no_access(" reviews", errors.get("reviews", 0))
-            review_line = f"{review_line}  {warn}" if review_line else f"👀 {warn}"
+            review_line = f"{review_line} · {warn}" if review_line else warn
         if review_line:
-            lines.append(review_line)
+            lines.append(f"Reviewers：{review_line}")
         if comments is None:
-            lines.append(f"🤖 {_no_access('评论和 AI review', errors.get('comments', 0))}")
+            lines.append(_no_access("评论和 AI review", errors.get("comments", 0)))
         if ai:
-            lines.append(f"🤖 AI 第 {len(ai)} 轮：{ai_conclusion(ai[-1].get('body') or '')}")
+            lines.append(f"AI 第 {len(ai)} 轮：{ai_conclusion(ai[-1].get('body') or '')}")
         if human_comments:
-            lines.append(f"💬 {human_comments} 条评论")
+            lines.append(f"{human_comments} 条评论")
         if activity and activity.get("text"):
-            lines.append(f"🕒 {activity['text']} · {_fmt_time(activity['at'])}")
+            lines.append(f"最近：{activity['text']} · {_fmt_time(activity['at'])}")
         actions = [
             {
                 "tag": "action",
