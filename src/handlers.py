@@ -32,8 +32,9 @@ class Result:
     code: int
     # 成功时为 queued / ignored，失败时为错误信息
     status: str
-    # 仅用于日志：被忽略的原因等
+    # 以下仅用于日志：被忽略的原因等、owner/repo#n
     detail: str = ""
+    tag: str = "?"
     trigger: Trigger | None = None
 
 
@@ -118,12 +119,14 @@ def handle(
     repo = (data.get("repository") or {}).get("full_name", "")
     if event_type == "issue_comment":
         issue = data.get("issue") or {}
-        if "pull_request" not in issue:
-            return Result(200, "ignored", "not_a_pr")
         number = int(issue.get("number") or 0)
+        tag = f"{repo}#{number}"
+        if "pull_request" not in issue:
+            return Result(200, "ignored", "not_a_pr", tag)
         handled, activity = _comment_activity(data)
     else:
         number = int((data.get("pull_request") or {}).get("number") or 0)
+        tag = f"{repo}#{number}"
         if event_type == "pull_request":
             actor = (data.get("sender") or {}).get("login", "")
             handled, activity = _pull_request_activity(data, actor)
@@ -131,8 +134,8 @@ def handle(
             handled, activity = _review_activity(data)
 
     if not handled:
-        return Result(200, "ignored", data.get("action") or "unknown")
+        return Result(200, "ignored", data.get("action") or "unknown", tag)
     if not repo or not number:
-        return Result(400, "Missing repo/pr")
+        return Result(400, "Missing repo/pr", tag=tag)
     pr = data.get("pull_request") if event_type == "pull_request" else None
-    return Result(200, "queued", trigger=Trigger(repo, number, activity, pr))
+    return Result(200, "queued", tag=tag, trigger=Trigger(repo, number, activity, pr))

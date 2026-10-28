@@ -7,14 +7,12 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-# 卡片头部颜色
-TEMPLATE = {"open": "red", "draft": "grey", "merged": "green", "closed": "grey"}
-# 头部状态标签：(文案, 颜色)
-STATE_TAG = {
-    "open": ("Open", "red"),
-    "draft": ("Draft", "neutral"),
-    "merged": ("Merged", "green"),
-    "closed": ("Closed", "neutral"),
+# 状态 → (头部标签文案, 标签颜色, 头部颜色)
+STATE_STYLE = {
+    "open": ("Open", "red", "red"),
+    "draft": ("Draft", "neutral", "grey"),
+    "merged": ("Merged", "green", "green"),
+    "closed": ("Closed", "neutral", "grey"),
 }
 
 # GitHub Actions 机器人登录名：AI review 由它以 issue comment 发出
@@ -189,13 +187,10 @@ def _file_row(path: str, adds: int, dels: int, count: int) -> dict:
 
 def _files_panel(pr: dict[str, Any], files: list[dict[str, Any]] | None, errors: dict[str, int]) -> dict:
     """折叠面板：标题为改动合计，展开后每个目录一行。"""
-    if "changed_files" in pr:
-        title = (
-            f"{_plural(pr['changed_files'], 'file')} <font color='green'>+{pr.get('additions', 0)}</font> "
-            f"<font color='red'>-{pr.get('deletions', 0)}</font> · {_plural(pr.get('commits', 0), 'commit')}"
-        )
-    else:
-        title = "改动文件"
+    title = (
+        f"{_plural(pr.get('changed_files', 0), 'file')} <font color='green'>+{pr.get('additions', 0)}</font> "
+        f"<font color='red'>-{pr.get('deletions', 0)}</font> · {_plural(pr.get('commits', 0), 'commit')}"
+    )
     if files is None:
         rows = [_markdown([_no_access("改动文件", errors.get("files") or errors.get("pr", 0))], "notation")]
     elif not files:
@@ -247,7 +242,7 @@ def build_status_card(
     url = pr.get("html_url", "")
     title = pr.get("title", "")
     author = (pr.get("user") or {}).get("login", "")
-    label, tag_color = STATE_TAG[state]
+    label, tag_color, template = STATE_STYLE[state]
 
     ai = [c for c in comments or [] if is_ai_comment(c)]
     human_comments = len(comments or []) - len(ai)
@@ -306,8 +301,8 @@ def build_status_card(
         # 更新卡片接口要求更新前后的卡片都声明为共享卡片
         "config": {"update_multi": True, "summary": {"content": f"[{label}] {title}"}},
         "header": {
-            "template": TEMPLATE[state],
-            "title": {"tag": "plain_text", "content": truncate_text(title, 200)},
+            "template": template,
+            "title": {"tag": "plain_text", "content": title},
             "subtitle": {"tag": "plain_text", "content": f"{repo.split('/')[-1]} #{pr.get('number')} · {author}"},
             "text_tag_list": [{"tag": "text_tag", "text": {"tag": "plain_text", "content": label}, "color": tag_color}],
         },

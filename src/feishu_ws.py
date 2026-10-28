@@ -109,6 +109,7 @@ def _dispatch(
             user_map.bind(gh_name, target_open_id, mentions[0].get("name", ""))
             send_text_message(token, chat_id, f"已将 {target_name} 绑定到 GitHub 用户 `{gh_name}`", ctx="cmd")
         else:
+            # 单聊里只有自己和机器人，名字按卡片群（config 的 chat_id）成员查
             name = get_chat_member_names(token, cfg.chat_id, ctx="cmd").get(sender_open_id, "")
             user_map.bind(gh_name, sender_open_id, name)
             send_text_message(token, chat_id, f"已将你绑定到 GitHub 用户 `{gh_name}`", ctx="cmd")
@@ -129,10 +130,6 @@ def _dispatch(
         if not all_items:
             send_text_message(token, chat_id, "当前无绑定", ctx="cmd")
             return
-        # 绑定时没取到名字的，按卡片群（config 的 chat_id）成员补全；单聊里只有自己和机器人
-        if any(not v.get("name") for v in all_items.values()):
-            user_map.set_names(get_chat_member_names(token, cfg.chat_id, ctx="cmd"))
-            all_items = user_map.list_all()
         lines = ["当前绑定："]
         for gh, v in all_items.items():
             lines.append(f"  {gh} → {v.get('name') or '（未知飞书用户）'}")

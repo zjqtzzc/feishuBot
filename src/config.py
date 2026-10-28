@@ -6,12 +6,12 @@
 
 import json
 import os
-from dataclasses import dataclass, fields
+from dataclasses import MISSING, dataclass, fields
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _DATA_DIR = os.path.abspath(os.environ.get("BOT_DATA_DIR") or _ROOT)
 
-DEFAULT_PATHS = [os.path.join(_DATA_DIR, "config.json")]
+CONFIG_PATH = os.path.join(_DATA_DIR, "config.json")
 
 
 @dataclass
@@ -24,29 +24,16 @@ class Config:
     github_webhook_secret: str = ""
 
 
-def load_config(paths: list[str] | None = None) -> Config:
-    paths = paths or DEFAULT_PATHS
-    for p in paths:
-        if os.path.exists(p):
-            try:
-                with open(p, "r", encoding="utf-8") as f:
-                    raw = json.load(f)
-            except (json.JSONDecodeError, OSError) as e:
-                raise RuntimeError(f"读取配置失败 {p}: {e}") from e
-            for field in fields(Config):
-                if field.name == "github_webhook_secret":
-                    continue
-                if field.name not in raw:
-                    raise RuntimeError(f"配置缺少必填项: {field.name}")
-            return Config(
-                github_webhook_port=int(raw["github_webhook_port"]),
-                github_token=raw["github_token"],
-                app_id=raw["app_id"],
-                app_secret=raw["app_secret"],
-                chat_id=raw["chat_id"],
-                github_webhook_secret=str(raw.get("github_webhook_secret", "")),
-            )
-    raise FileNotFoundError(f"未找到配置文件，已尝试: {paths}")
+def load_config() -> Config:
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        raise RuntimeError(f"读取配置失败 {CONFIG_PATH}: {e}") from e
+    missing = [f.name for f in fields(Config) if f.default is MISSING and f.name not in raw]
+    if missing:
+        raise RuntimeError(f"配置缺少必填项: {', '.join(missing)}")
+    return Config(**{f.name: raw[f.name] for f in fields(Config) if f.name in raw})
 
 
 def data_dir() -> str:

@@ -17,7 +17,6 @@ from src.feishu_ws import start_ws_client
 from src.github_api import GitHubAPI
 from src.handlers import HANDLED_EVENTS, handle
 from src.user_map import USER_MAP_FILENAME, UserMap
-from src.webhook_logging import ctx_tag, setup_logging
 from src.worker import CardWorker
 
 log = logging.getLogger(__name__)
@@ -59,7 +58,6 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(400, {"error": "Invalid JSON"})
                 return
 
-        tag, gh_action = ctx_tag(event_type, data)
         t0 = time.monotonic()
         res = handle(
             raw,
@@ -73,9 +71,9 @@ class Handler(BaseHTTPRequestHandler):
         elapsed = time.monotonic() - t0
         log.info(
             "[%s] %s action=%s -> HTTP %s %s %s %.3fs delivery=%s",
-            tag,
+            res.tag,
             event_type,
-            gh_action or "-",
+            (data or {}).get("action") or "-",
             res.code,
             res.status,
             res.detail or "-",
@@ -105,9 +103,18 @@ class QuietHTTPServer(ThreadingHTTPServer):
         super().handle_error(request, client_address)
 
 
+def setup_logging() -> None:
+    logging.basicConfig(
+        stream=sys.stdout,
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+
+
 def main():
     setup_logging()
-    port = Handler.cfg.github_webhook_port
 
     threading.Thread(target=Handler.worker.run, daemon=True, name="card-worker").start()
     threading.Thread(
@@ -117,9 +124,4 @@ def main():
         name="feishu-ws",
     ).start()
 
-    try:
-        QuietHTTPServer(("0.0.0.0", port), Handler).serve_forever()
-    except OSError as e:
-        if getattr(e, "errno", None) == 98:
-            log.error("bind failed port=%s address already in use", port)
-        raise
+    QuietHTTPServer(("0.0.0.0", Handler.cfg.github_webhook_port), Handler).serve_forever()

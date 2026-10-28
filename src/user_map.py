@@ -54,18 +54,6 @@ class UserMap:
             self._save()
             return True
 
-    def set_names(self, names: dict[str, str]) -> None:
-        """按 open_id 补全飞书名字。"""
-        with self._lock:
-            changed = False
-            for v in self._data.values():
-                name = names.get(v["open_id"])
-                if name and name != v.get("name"):
-                    v["name"] = name
-                    changed = True
-            if changed:
-                self._save()
-
     def list_all(self) -> dict[str, dict[str, str]]:
         with self._lock:
             return {gh: dict(v) for gh, v in self._data.items()}

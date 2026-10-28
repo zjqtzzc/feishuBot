@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""往指定群发送几种状态的示例卡片，用来检查卡片排版；并测试旧版 1.0 卡片能否更新为 2.0。
+"""往指定群发送几种状态的示例卡片，用来检查卡片排版。
 
 在安装目录运行（读取 data/config.json 里的飞书应用凭据）：
     cd output/app && BOT_DATA_DIR=../data ../venv/bin/python scripts/preview_card.py <chat_id> [示例序号 ...]
@@ -13,7 +13,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.config import load_config
-from src.feishu_api import patch_interactive_card, send_interactive_card
+from src.feishu_api import send_interactive_card
 from src.feishu_card import build_status_card
 from src.feishu_credential import get_tenant_access_token
 
@@ -63,13 +63,6 @@ SAMPLES = [
     ("已合并", {**PR, "state": "closed", "merged": True, "merged_by": {"login": "zhanbo86"}}, [], [AI_OK, AI_BAD], None, {}, None),
 ]
 
-# 旧版（JSON 1.0）卡片：与升级前发出的卡片结构一致，没有 config.update_multi
-LEGACY_CARD = {
-    "header": {"template": "red", "title": {"content": "旧版 1.0 卡片（应被更新为 2.0）", "tag": "plain_text"}},
-    "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": "**zjqtzzc** opened"}}],
-}
-
-
 def main() -> None:
     if len(sys.argv) < 2:
         sys.exit(__doc__)
@@ -85,17 +78,6 @@ def main() -> None:
             continue
         card = build_status_card(pr, reviews, comments, activity, REPO, {}, errors, files)
         print(f"{name}: {'OK' if send_interactive_card(token, chat_id, card) else '发送失败'}")
-
-    if only:
-        return
-    mid = send_interactive_card(token, chat_id, LEGACY_CARD)
-    if not mid:
-        sys.exit("旧版卡片发送失败")
-    time.sleep(2)
-    _, pr, reviews, comments, activity, errors, files = SAMPLES[0]
-    card = build_status_card(pr, reviews, comments, activity, REPO, {}, errors, files)
-    code = patch_interactive_card(token, mid, card)
-    print(f"旧版 1.0 卡片更新为 2.0: code={code} {'OK' if code == 0 else '失败（线上旧卡片会被重发为新卡片）'}")
 
 
 if __name__ == "__main__":
