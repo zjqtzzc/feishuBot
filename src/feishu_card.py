@@ -151,12 +151,13 @@ def build_status_card(
     """reviews / comments 为 None 表示无权限读取；errors 记录读取失败部分的 HTTP 状态码。
 
     头部：PR 标题，副标题「仓库 #号 · 作者」，状态标签。
-    正文：reviewer 与 AI 结论。底部小号字：分支、改动统计、评论数、最近动态。
-    整张卡片点击跳转 PR。
+    正文：reviewer 与 AI 结论。底部小号字：分支、改动统计、评论数、最近动态，以及「查看 PR」按钮。
+    合并/关闭后只剩一行小号字，末尾为「查看 PR」链接。
     """
     fm = feishu_map or {}
     errors = errors or {}
     state = pr_state(pr)
+    url = pr.get("html_url", "")
     title = pr.get("title", "")
     author = (pr.get("user") or {}).get("login", "")
     label, tag_color = STATE_TAG[state]
@@ -171,7 +172,7 @@ def build_status_card(
         parts = [who, f"{pr.get('commits', 0)} commits"]
         if ai:
             parts.append(f"AI review {len(ai)} 轮")
-        meta.append(_grey(" · ".join(parts)))
+        meta.append(f"{_grey(' · '.join(parts))} · [查看 PR]({url})")
         if errors:
             meta.append(_no_access("部分信息", next(iter(errors.values()))))
     else:
@@ -201,12 +202,20 @@ def build_status_card(
     if main:
         elements.append(_markdown(main))
     elements.append(_markdown(meta, "notation"))
+    if state not in ("merged", "closed"):
+        elements.append(
+            {
+                "tag": "button",
+                "type": "primary",
+                "text": {"tag": "plain_text", "content": "查看 PR"},
+                "behaviors": [{"type": "open_url", "default_url": url}],
+            }
+        )
 
     return {
         "schema": "2.0",
         # 更新卡片接口要求更新前后的卡片都声明为共享卡片
         "config": {"update_multi": True, "summary": {"content": f"[{label}] {title}"}},
-        "card_link": {"url": pr.get("html_url", "")},
         "header": {
             "template": TEMPLATE[state],
             "title": {"tag": "plain_text", "content": truncate_text(title, 200)},
