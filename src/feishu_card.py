@@ -121,14 +121,13 @@ def _ai_line(ai: list[dict[str, Any]]) -> str:
     return f"{tag} {conclusion} {_grey(f'第 {len(ai)} 轮')}"
 
 
-def _group_files(files: list[dict[str, Any]], depth: int) -> dict[str, list]:
-    """按前 depth 层路径分组：{路径: [增, 删, 文件数, 唯一文件的完整路径]}。目录以 / 结尾。"""
-    out: dict[str, list] = {}
+def _group_files(files: list[dict[str, Any]], depth: int) -> dict[str, list[int]]:
+    """按前 depth 层路径分组：{路径: [增, 删, 文件数]}。目录以 / 结尾，层级不足的文件用完整路径。"""
+    out: dict[str, list[int]] = {}
     for f in files:
-        name = f.get("filename") or ""
-        parts = name.split("/")
-        key = "/".join(parts[:depth]) + "/" if len(parts) > depth else name
-        g = out.setdefault(key, [0, 0, 0, name])
+        parts = (f.get("filename") or "").split("/")
+        key = "/".join(parts[:depth]) + "/" if len(parts) > depth else "/".join(parts)
+        g = out.setdefault(key, [0, 0, 0])
         g[0] += f.get("additions", 0)
         g[1] += f.get("deletions", 0)
         g[2] += 1
@@ -138,19 +137,14 @@ def _group_files(files: list[dict[str, Any]], depth: int) -> dict[str, list]:
 def summarize_files(files: list[dict[str, Any]]) -> list[tuple[str, int, int, int]]:
     """改动文件按目录汇总，返回 [(路径, 增, 删, 文件数)]，按路径排序。
 
-    分组粒度自动选择：分组数不超过 MAX_FILE_GROUPS 的前提下取分组最多、且最具体（最深）的一层。
-    只含一个文件的分组直接显示该文件；路径过深时显示时省略中间部分。
-    最浅一层仍超出上限时，保留改动最多的几组，其余合并为「其他 N 项」放在最后。
+    从第 2 层开始，取第一个能分出 2 组以上的层级；超过 MAX_FILE_GROUPS 时，
+    保留改动最多的几组，其余合并为「其他 N 项」放在最后。
     """
     if not files:
         return []
     max_depth = max(len((f.get("filename") or "").split("/")) for f in files)
-    best = _group_files(files, 1)
-    for depth in range(2, max_depth + 1):
-        groups = _group_files(files, depth)
-        if len(best) <= len(groups) <= MAX_FILE_GROUPS:
-            best = groups
-    rows = [(name if count == 1 else key, adds, dels, count) for key, (adds, dels, count, name) in best.items()]
+    depth = next((d for d in range(2, max_depth + 1) if len(_group_files(files, d)) > 1), max_depth)
+    rows = [(k, *v) for k, v in _group_files(files, depth).items()]
     other = None
     if len(rows) > MAX_FILE_GROUPS:
         rows.sort(key=lambda r: -(r[1] + r[2]))
@@ -175,11 +169,11 @@ def _plural(n: int, word: str) -> str:
 
 
 def _file_row(path: str, adds: int, dels: int, count: int) -> dict:
-    """一行改动：左栏路径（多文件时附文件数），右栏增删，分栏保证各行数字对齐。"""
+    """一行改动：左栏路径，右栏文件数（多于 1 个时）和增删，分栏保证各行数字对齐。"""
     name = path if path.startswith("其他 ") else _short_path(path)
-    if count > 1:
-        name += f" ({count})"
     stat = f"<font color='green'>+{adds}</font> <font color='red'>-{dels}</font>"
+    if count > 1:
+        stat = f"{_grey(f'{count} files')}  {stat}"
     return {
         "tag": "column_set",
         "flex_mode": "none",
