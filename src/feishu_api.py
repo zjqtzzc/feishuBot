@@ -15,7 +15,7 @@ log = logging.getLogger(__name__)
 RATE_LIMIT_CODES = frozenset({99991400, 230020})
 
 
-def _call(method: str, url: str, token: str, body: dict, params: dict | None = None,
+def _call(method: str, url: str, token: str, body: dict | None, params: dict | None = None,
           timeout: int = 10, ctx: str = "", op: str = "") -> tuple[int | None, dict]:
     """返回 (code, data)；网络错误或响应不是 JSON 时 code 为 None。"""
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json; charset=utf-8"}
@@ -55,3 +55,21 @@ def patch_interactive_card(token: str, message_id: str, card: dict, ctx: str = "
     code, _ = _call("PATCH", f"{FEISHU_MSG_URL}/{message_id}", token, {"content": json.dumps(card)},
                     ctx=ctx, op="patch_card")
     return code
+
+
+def get_chat_member_names(token: str, chat_id: str, ctx: str = "") -> dict[str, str]:
+    """群成员 open_id → 飞书名字；失败返回已取到的部分。需要应用有读取群成员的权限。"""
+    url = f"https://open.feishu.cn/open-apis/im/v1/chats/{chat_id}/members"
+    names: dict[str, str] = {}
+    params = {"member_id_type": "open_id", "page_size": 100}
+    for _ in range(20):
+        code, data = _call("GET", url, token, None, params, ctx=ctx, op="chat_members")
+        if code != 0:
+            break
+        d = data.get("data") or {}
+        for m in d.get("items") or []:
+            names[m.get("member_id", "")] = m.get("name", "")
+        if not d.get("has_more"):
+            break
+        params = {**params, "page_token": d.get("page_token")}
+    return names
