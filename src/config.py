@@ -1,13 +1,17 @@
 # -*- coding: utf-8 -*-
-"""配置：从项目根目录的 config.json 加载"""
+"""配置：从数据目录的 config.json 加载。
+
+数据目录（config.json、卡片记录、用户映射）默认是项目根目录，可用环境变量 BOT_DATA_DIR 指定。
+"""
 
 import json
 import os
 from dataclasses import dataclass, fields
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_DATA_DIR = os.path.abspath(os.environ.get("BOT_DATA_DIR") or _ROOT)
 
-DEFAULT_PATHS = [os.path.join(_ROOT, "config.json")]
+DEFAULT_PATHS = [os.path.join(_DATA_DIR, "config.json")]
 
 
 @dataclass
@@ -45,5 +49,5 @@ def load_config(paths: list[str] | None = None) -> Config:
     raise FileNotFoundError(f"未找到配置文件，已尝试: {paths}")
 
 
-def project_root() -> str:
-    return _ROOT
+def data_dir() -> str:
+    return _DATA_DIR

@@ -1,12 +1,15 @@
 #!/bin/bash
 
 # GitHub PR to Feishu Bot 卸载脚本
-# 关闭服务并删除相关文件
+#
+#   sudo ./uninstall.sh          停止并删除服务和代码，保留 data/（配置、卡片记录、用户映射）
+#   sudo ./uninstall.sh --purge  连 data/ 一起删除
 
 set -e
 
 # ========== 顶端配置：安装位置（仅当无 systemd 配置时用作回退） ==========
 INSTALL_DIR="./output"
+SERVICE="github-feishu-bot"
 # ================================================
 
 RED='\033[0;31m'
@@ -14,51 +17,45 @@ GREEN='\033[0;32m'
 NC='\033[0m'
 
 log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+die() { echo -e "${RED}[ERROR]${NC} $1" >&2; exit 1; }
 
-check_root() {
-    if [[ $EUID -ne 0 ]]; then
-        log_error "此脚本需要 root 权限运行"
-        log_info "请使用: sudo $0"
-        exit 1
-    fi
-}
+[[ $EUID -eq 0 ]] || die "此脚本需要 root 权限运行，请使用: sudo $0"
+
+unit_file="/etc/systemd/system/$SERVICE.service"
 
 get_install_dir() {
-    if [[ -f /etc/systemd/system/github-feishu-bot.service ]]; then
-        grep '^WorkingDirectory=' /etc/systemd/system/github-feishu-bot.service | cut -d= -f2
+    local wd
+    if [[ -f "$unit_file" ]]; then
+        wd=$(grep '^WorkingDirectory=' "$unit_file" | cut -d= -f2)
+        # 新布局 WorkingDirectory 是 <安装目录>/app
+        [[ "$(basename "$wd")" == "app" ]] && dirname "$wd" || echo "$wd"
     else
+        local script_dir
         script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-        (cd "$script_dir" && cd "$INSTALL_DIR" && pwd)
-    fi
-}
-
-install_dir=$(get_install_dir)
-
-stop_and_disable() {
-    log_info "停止并禁用服务..."
-    systemctl stop github-feishu-bot 2>/dev/null || true
-    systemctl disable github-feishu-bot 2>/dev/null || true
-}
-
-remove_service_file() {
-    log_info "删除 systemd 服务配置..."
-    rm -f /etc/systemd/system/github-feishu-bot.service
-    systemctl daemon-reload
-}
-
-remove_install_dir() {
-    if [[ -n "$install_dir" && -d "$install_dir" ]]; then
-        log_info "删除安装目录 $install_dir ..."
-        rm -rf "$install_dir"
+        (cd "$script_dir" && cd "$INSTALL_DIR" 2>/dev/null && pwd)
     fi
 }
 
 main() {
-    check_root
-    stop_and_disable
-    remove_service_file
-    remove_install_dir
+    local base
+    base=$(get_install_dir)
+
+    log_info "停止并删除服务..."
+    systemctl stop "$SERVICE" 2>/dev/null || true
+    systemctl disable "$SERVICE" 2>/dev/null || true
+    rm -f "$unit_file"
+    systemctl daemon-reload
+
+    [[ -n "$base" && -d "$base" ]] || { log_info "卸载完成"; return; }
+    if [[ "$1" == "--purge" ]]; then
+        log_info "删除安装目录 $base ..."
+        rm -rf "$base"
+    else
+        log_info "删除代码与虚拟环境，保留 $base/data ..."
+        # 旧版布局的数据直接在安装目录下，也一并保留
+        find "$base" -mindepth 1 -maxdepth 1 ! -name data ! -name config.json \
+            ! -name .pr_event_store ! -name .user_map.json -exec rm -rf {} +
+    fi
     log_info "卸载完成"
 }
 
