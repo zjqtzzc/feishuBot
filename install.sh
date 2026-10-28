@@ -1,13 +1,28 @@
 #!/bin/bash
 
-# GitHub PR to Feishu Bot 安装脚本
-# 复制工程到安装目录，注册为 systemd 服务并自启动
+# GitHub PR to Feishu Bot 安装 / 升级脚本（首次安装和升级都用它）
+#
+#   sudo ./install.sh            安装或升级到当前源码
+#   sudo ./install.sh rollback   回退到上一版代码
+#
+# 安装目录结构：
+#   output/app/       当前代码（每次升级整体替换）
+#   output/app.prev/  上一版代码，用于回滚
+#   output/venvs/     按 requirements.txt 哈希区分的虚拟环境，依赖没变就复用
+#   output/venv       → 当前使用的 venvs/<哈希>
+#   output/data/      config.json、卡片记录、用户映射；升级永不覆盖
+#
+# 升级流程：新代码和依赖先装到旁边并验证（缺配置项等会在这一步失败，线上不受影响）
+# → 停服务 → 替换代码 → 启动 → 检查端口；启动失败自动回滚到上一版。
 
 set -e
 
-# ========== 顶端配置：安装位置（可修改） ==========
+# ========== 顶端配置（可修改） ==========
 INSTALL_DIR="./output"
-# ================================================
+SERVICE="github-feishu-bot"
+# 额外的 pip 参数，例如国内镜像：PIP_ARGS="-i https://pypi.tuna.tsinghua.edu.cn/simple"
+PIP_ARGS=""
+# =======================================
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -16,206 +31,246 @@ NC='\033[0m'
 
 log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+die() { echo -e "${RED}[ERROR]${NC} $1" >&2; exit 1; }
 
-check_root() {
-    if [[ $EUID -ne 0 ]]; then
-        log_error "此脚本需要 root 权限运行"
-        log_info "请使用: sudo $0"
-        exit 1
-    fi
-}
+[[ $EUID -eq 0 ]] || die "此脚本需要 root 权限运行，请使用: sudo $0"
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-install_dir=$(cd "$script_dir" && mkdir -p "$INSTALL_DIR" && cd "$INSTALL_DIR" && pwd)
+base=$(cd "$script_dir" && mkdir -p "$INSTALL_DIR" && cd "$INSTALL_DIR" && pwd)
+[[ "$base" != "$script_dir" ]] || die "安装目录不能与源码目录相同"
 run_user="${SUDO_USER:-root}"
 run_group=$(id -gn "$run_user")
+unit_file="/etc/systemd/system/$SERVICE.service"
+data="$base/data"
 
-copy_project() {
-    log_info "复制工程到 $install_dir ..."
-    mkdir -p "$install_dir"
-    if [[ "$script_dir" == "$install_dir" ]]; then
-        log_error "安装目录不能与脚本所在目录相同"
-        exit 1
-    fi
-    # 不拷贝运行时缓存与本地 token（目标机由服务自行生成）
-    rsync -a \
+# 旧版布局：代码、venv 软链接、配置和数据都直接放在安装目录下
+LEGACY_DATA=(config.json .pr_event_store .user_map.json)
+LEGACY_CODE=(app.py src requirements.txt config.json.example .gitignore install.sh setup.sh uninstall.sh venv)
+
+is_legacy() { [[ -f "$base/app.py" ]]; }
+
+check_dependencies() {
+    command -v python3 &> /dev/null || die "未安装 python3: sudo apt install python3"
+    python3 -c 'import sys; sys.exit(sys.version_info < (3, 10))' || die "需要 Python 3.10 及以上"
+    python3 -m venv --help &> /dev/null || die "未安装 python3-venv: sudo apt install python3-venv"
+    command -v rsync &> /dev/null || die "未安装 rsync: sudo apt install rsync"
+}
+
+stage_code() {
+    log_info "准备新代码 $base/app.new ..."
+    rsync -a --delete \
+        --exclude='.git' \
         --exclude='venv' \
         --exclude='__pycache__' \
-        --exclude='.git' \
-        --exclude="$(basename "$install_dir")" \
-        --exclude='.pr_event_store' \
-        --exclude='.feishu_token' \
+        --exclude="$(basename "$base")" \
+        --exclude='config.json' \
+        --exclude='.pr_event_store*' \
         --exclude='.user_map.json' \
-        "$script_dir/" "$install_dir/"
+        --exclude='.feishu_token' \
+        --exclude='*.log' \
+        "$script_dir/" "$base/app.new/"
 }
 
-set_normal_permissions() {
-    log_info "设置普通文件权限..."
-    chown -R "$run_user:$run_group" "$install_dir"
-    find "$install_dir" -not -path "*/venv/*" -type d -exec chmod 755 {} +
-    find "$install_dir" -not -path "*/venv/*" -type f -exec chmod 644 {} +
-}
-
-setup_venv() {
-    local src_venv="$script_dir/venv"
-    local dst_venv="$install_dir/venv"
-
-    if [[ ! -d "$src_venv" ]] || [[ ! -x "$src_venv/bin/python" ]]; then
-        log_error "源目录 venv 不存在或不可用，请先运行 setup.sh"
-        exit 1
+prepare_venv() {
+    req_hash=$(sha256sum "$base/app.new/requirements.txt" | cut -c1-12)
+    new_venv="$base/venvs/$req_hash"
+    if [[ -x "$new_venv/bin/python" && -f "$new_venv/.ok" ]]; then
+        log_info "依赖未变化，复用虚拟环境 venvs/$req_hash"
+        return
     fi
-
-    # 若 output/venv 是真实目录则删除，若是旧软链接也删除
-    if [[ -d "$dst_venv" ]] && [[ ! -L "$dst_venv" ]]; then
-        log_warn "output/venv 是独立虚拟环境，将替换为软链接以复用源 venv"
-        rm -rf "$dst_venv"
-    elif [[ -L "$dst_venv" ]]; then
-        rm -f "$dst_venv"
-    fi
-
-    ln -s "$src_venv" "$dst_venv"
-    log_info "已链接 venv: $dst_venv -> $src_venv"
+    log_info "创建虚拟环境 venvs/$req_hash ..."
+    rm -rf "$new_venv"
+    mkdir -p "$base/venvs"
+    python3 -m venv "$new_venv"
+    # shellcheck disable=SC2086
+    "$new_venv/bin/python" -m pip install -q --disable-pip-version-check $PIP_ARGS -r "$base/app.new/requirements.txt"
+    touch "$new_venv/.ok"
 }
 
-check_config() {
-    if [[ ! -f "$install_dir/config.json" ]]; then
-        if [[ -f "$install_dir/config.json.example" ]]; then
-            cp "$install_dir/config.json.example" "$install_dir/config.json"
-            log_warn "已从 config.json.example 复制，请编辑 $install_dir/config.json 填写实际配置"
-        else
-            log_error "config.json 不存在且无 config.json.example"
-            exit 1
-        fi
+# 找到当前生效的配置目录：新布局 data/，旧布局安装目录本身；都没有则生成模板并退出
+config_dir() {
+    if [[ -f "$data/config.json" ]]; then
+        echo "$data"
+    elif is_legacy && [[ -f "$base/config.json" ]]; then
+        echo "$base"
+    else
+        mkdir -p "$data"
+        cp "$base/app.new/config.json.example" "$data/config.json"
+        chown -R "$run_user:$run_group" "$data"
+        chmod 600 "$data/config.json"
+        die "已生成 $data/config.json，请填写实际配置后重新运行本脚本"
     fi
 }
 
-stop_existing_service() {
-    # 若之前已安装并启动过，则先停掉并禁用，避免后续启动再次抢端口
-    if systemctl is-active --quiet github-feishu-bot 2>/dev/null; then
-        log_info "检测到 github-feishu-bot 正在运行，准备停止..."
-        systemctl stop github-feishu-bot 2>/dev/null || true
-    fi
-    systemctl disable github-feishu-bot 2>/dev/null || true
-    systemctl reset-failed github-feishu-bot 2>/dev/null || true
-    sleep 1
+validate() {
+    log_info "验证新代码与配置..."
+    local cfg_dir
+    cfg_dir=$(config_dir)
+    (cd "$base/app.new" && BOT_DATA_DIR="$cfg_dir" "$new_venv/bin/python" -c "import app") \
+        || die "新版本验证失败（见上方报错），线上服务未做任何改动"
+    check_port_owner "$cfg_dir/config.json"
 }
 
-ensure_port_released() {
-    # 仅当 config.json 可用时才尝试释放端口，避免在没配置时误杀
-    if [[ ! -f "$install_dir/config.json" ]]; then
-        return 0
+config_port() {
+    python3 -c "import json, sys; print(json.load(open(sys.argv[1]))['github_webhook_port'])" "$1"
+}
+
+# 端口若被本服务以外的进程占着（如手动启动的旧进程），新服务会 bind 失败，而检查时却能看到端口在监听
+check_port_owner() {
+    command -v ss &> /dev/null || return 0
+    local port holder main
+    port=$(config_port "$1")
+    holder=$(ss -ltnp "sport = :$port" | awk 'NR>1' | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | head -1)
+    [[ -n "$holder" ]] || return 0
+    main=$(systemctl show -p MainPID --value "$SERVICE" 2>/dev/null || true)
+    [[ "$holder" == "$main" ]] && return 0
+    die "端口 $port 被本服务以外的进程占用（pid=$holder: $(ps -p "$holder" -o args= 2>/dev/null)），请先停掉它；线上服务未做任何改动"
+}
+
+stop_service() {
+    if [[ -f "$unit_file" ]]; then
+        log_info "停止服务..."
+        systemctl stop "$SERVICE" 2>/dev/null || true
     fi
-    if ! command -v jq &> /dev/null; then
-        return 0
-    fi
+}
 
-    local port
-    port=$(jq -r '.github_webhook_port' "$install_dir/config.json" 2>/dev/null || echo "")
-    [[ -z "$port" || "$port" == "null" ]] && return 0
-
-    local i line pid cmd
-    for i in {1..10}; do
-        # awk：若发现了 LISTEN 行(NR>1)则返回 1；若未发现则返回 0（端口已释放）
-        if ss -ltnp "sport = :${port}" 2>/dev/null | awk 'NR>1{exit 1} END{exit 0}'; then
-            return 0
-        fi
-
-        line=$(ss -ltnp "sport = :${port}" 2>/dev/null | awk 'NR==2{print; exit}')
-        pid=$(printf '%s' "$line" | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p')
-        if [[ -n "$pid" ]]; then
-            cmd=$(ps -p "$pid" -o args= 2>/dev/null || echo "")
-            if [[ "$cmd" == *"app.py"* && "$cmd" == *"$install_dir"* ]]; then
-                log_warn "端口 ${port} 仍被占用(pid=${pid})，尝试终止以避免 bind 失败..."
-                kill -9 "$pid" 2>/dev/null || true
-                sleep 1
-                continue
-            else
-                log_error "端口 ${port} 被非本服务占用: pid=${pid} cmd=${cmd}"
-                return 1
-            fi
-        fi
-        sleep 1
+migrate_legacy() {
+    is_legacy || return 0
+    log_info "迁移旧版布局：数据移到 data/，旧代码移到 app.prev/"
+    mkdir -p "$data"
+    local f
+    for f in "${LEGACY_DATA[@]}"; do
+        [[ -e "$base/$f" ]] && mv "$base/$f" "$data/$f"
     done
-
-    log_error "端口 ${port} 在超时后仍未释放，无法继续安装"
-    return 1
+    rm -f "$base/.feishu_token"
+    rm -rf "$base/app.prev" "$base/__pycache__"
+    mkdir -p "$base/app.prev"
+    for f in "${LEGACY_CODE[@]}"; do
+        # venv 是指向源码目录的软链接，只删链接本身
+        if [[ -L "$base/$f" ]]; then
+            rm -f "$base/$f"
+        elif [[ -e "$base/$f" ]]; then
+            mv "$base/$f" "$base/app.prev/"
+        fi
+    done
 }
 
-setup_systemd() {
-    log_info "注册 systemd 服务..."
-    cat > /etc/systemd/system/github-feishu-bot.service << UNIT
+switch_code() {
+    log_info "替换代码..."
+    if [[ -d "$base/app" ]]; then
+        rm -rf "$base/app.prev"
+        mv "$base/app" "$base/app.prev"
+        [[ -L "$base/venv" ]] && readlink "$base/venv" > "$base/app.prev/.venv"
+    fi
+    mv "$base/app.new" "$base/app"
+    ln -sfn "venvs/$req_hash" "$base/venv"
+}
+
+write_unit() {
+    cat > "$unit_file" << UNIT
 [Unit]
 Description=GitHub PR to Feishu Bot Service
-After=network.target
-Wants=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=exec
 User=$run_user
 Group=$run_group
-WorkingDirectory=$install_dir
-Environment=PATH=$install_dir/venv/bin:/usr/local/bin:/usr/bin
-ExecStart=$install_dir/venv/bin/python app.py
+WorkingDirectory=$base/app
+Environment=BOT_DATA_DIR=$data
+ExecStart=$base/venv/bin/python $base/app/app.py
 Restart=always
 RestartSec=10
-
-# 方案A：加固停止/重启时的清理，避免旧进程仍在 LISTEN 导致新实例 bind 失败
 TimeoutStopSec=10
-KillSignal=SIGTERM
-FinalKillSignal=SIGKILL
 KillMode=control-group
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=github-feishu-bot
+SyslogIdentifier=$SERVICE
 
 [Install]
 WantedBy=multi-user.target
 UNIT
     systemctl daemon-reload
+    systemctl enable --quiet "$SERVICE"
 }
 
-enable_and_start() {
-    log_info "设置自启动并启动服务..."
-    systemctl enable github-feishu-bot
-    systemctl start github-feishu-bot
-    sleep 2
-    if systemctl is-active --quiet github-feishu-bot; then
-        log_info "服务启动成功"
+port_listening() {
+    command -v ss &> /dev/null || return 0
+    ss -ltn "sport = :$1" | grep -q LISTEN
+}
+
+# 启动后在 15 秒内看到端口监听才算成功
+start_and_check() {
+    chown -R "$run_user:$run_group" "$base"
+    chmod 600 "$data/config.json"
+    systemctl start "$SERVICE" || true
+    local port i
+    port=$(config_port "$data/config.json")
+    for i in {1..15}; do
+        sleep 1
+        if systemctl is-active --quiet "$SERVICE" && port_listening "$port"; then
+            log_info "服务已启动，端口 $port"
+            return 0
+        fi
+    done
+    return 1
+}
+
+rollback() {
+    [[ -d "$base/app.prev" && -f "$base/app.prev/.venv" ]] || die "没有可回滚的上一版"
+    log_warn "回滚到上一版..."
+    systemctl stop "$SERVICE" 2>/dev/null || true
+    rm -rf "$base/app.failed"
+    [[ -d "$base/app" ]] && mv "$base/app" "$base/app.failed"
+    mv "$base/app.prev" "$base/app"
+    ln -sfn "$(cat "$base/app/.venv")" "$base/venv"
+    if start_and_check; then
+        log_warn "已回滚到上一版；被替换的版本保留在 $base/app.failed"
     else
-        log_error "服务启动失败"
-        systemctl status github-feishu-bot --no-pager
-        exit 1
+        die "回滚后仍启动失败，请查看: journalctl -u $SERVICE -n 100"
     fi
 }
 
-show_info() {
-    local port
-    port=$(jq -r '.github_webhook_port' "$install_dir/config.json")
-    echo ""
-    echo "=== 安装完成 ==="
-    echo "安装目录: $install_dir"
-    echo "使用 venv: $script_dir/venv"
-    echo ""
-    echo "管理命令:"
-    echo "  sudo systemctl start github-feishu-bot"
-    echo "  sudo systemctl stop github-feishu-bot"
-    echo "  sudo systemctl restart github-feishu-bot"
-    echo "  sudo journalctl -u github-feishu-bot -f"
+prune_venvs() {
+    local keep_cur keep_prev d
+    keep_cur=$(readlink "$base/venv")
+    keep_prev=$(cat "$base/app.prev/.venv" 2>/dev/null || true)
+    for d in "$base"/venvs/*; do
+        [[ -d "$d" ]] || continue
+        [[ "venvs/$(basename "$d")" == "$keep_cur" || "venvs/$(basename "$d")" == "$keep_prev" ]] && continue
+        rm -rf "$d"
+    done
 }
 
 main() {
-    log_info "开始安装 GitHub PR to Feishu Bot ..."
-    check_root
-    stop_existing_service
-    copy_project
-    setup_venv
-    set_normal_permissions
-    check_config
-    ensure_port_released
-    setup_systemd
-    enable_and_start
-    show_info
+    check_dependencies
+    if [[ "$1" == "rollback" ]]; then
+        rollback
+        return
+    fi
+    log_info "安装 / 升级 GitHub PR to Feishu Bot 到 $base"
+    stage_code
+    prepare_venv
+    validate
+    stop_service
+    migrate_legacy
+    switch_code
+    write_unit
+    if ! start_and_check; then
+        journalctl -u "$SERVICE" -n 30 --no-pager || true
+        if [[ -f "$base/app.prev/.venv" ]]; then
+            rollback
+            exit 1
+        fi
+        die "启动失败，且没有可自动回滚的版本，请查看: journalctl -u $SERVICE -n 100"
+    fi
+    prune_venvs
+    echo ""
+    echo "=== 完成 ==="
+    echo "代码: $base/app    数据与配置: $data"
+    echo "日志: sudo journalctl -u $SERVICE -f"
+    echo "回滚: sudo $0 rollback"
 }
 
 main "$@"

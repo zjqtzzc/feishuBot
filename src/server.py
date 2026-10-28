@@ -12,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
 from src.card_store import CARD_STORE_FILENAME, CardStore
-from src.config import load_config, project_root
+from src.config import data_dir, load_config
 from src.feishu_ws import start_ws_client
 from src.github_api import GitHubAPI
 from src.handlers import HANDLED_EVENTS, handle
@@ -27,7 +27,7 @@ REQUEST_TIMEOUT = 30
 
 
 def _setup():
-    root = project_root()
+    root = data_dir()
     cfg = load_config()
     user_map = UserMap(os.path.join(root, USER_MAP_FILENAME))
     store = CardStore(os.path.join(root, CARD_STORE_FILENAME))
