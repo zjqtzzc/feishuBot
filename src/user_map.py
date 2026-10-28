@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """GitHub → 飞书用户映射表，持久化到 .user_map.json
 
-格式：{github 用户名: {"open_id": ..., "name": 飞书名字}}；兼容旧格式 {github 用户名: open_id}。
+格式：{github 用户名: {"open_id": ..., "name": 飞书名字}}。
 """
 
 from __future__ import annotations
@@ -28,12 +28,9 @@ class UserMap:
             return
         try:
             with open(self._filepath, "r", encoding="utf-8") as f:
-                raw = json.load(f)
+                self._data = json.load(f)
         except (json.JSONDecodeError, OSError) as e:
             log.warning("Failed to load user map: %s", e)
-            return
-        for gh, v in raw.items():
-            self._data[gh] = {"open_id": v, "name": ""} if isinstance(v, str) else v
 
     def _save(self) -> None:
         try:

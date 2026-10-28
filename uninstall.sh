@@ -24,11 +24,9 @@ die() { echo -e "${RED}[ERROR]${NC} $1" >&2; exit 1; }
 unit_file="/etc/systemd/system/$SERVICE.service"
 
 get_install_dir() {
-    local wd
     if [[ -f "$unit_file" ]]; then
-        wd=$(grep '^WorkingDirectory=' "$unit_file" | cut -d= -f2)
-        # 新布局 WorkingDirectory 是 <安装目录>/app
-        [[ "$(basename "$wd")" == "app" ]] && dirname "$wd" || echo "$wd"
+        # WorkingDirectory 是 <安装目录>/app
+        dirname "$(grep '^WorkingDirectory=' "$unit_file" | cut -d= -f2)"
     else
         local script_dir
         script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -52,9 +50,7 @@ main() {
         rm -rf "$base"
     else
         log_info "删除代码与虚拟环境，保留 $base/data ..."
-        # 旧版布局的数据直接在安装目录下，也一并保留
-        find "$base" -mindepth 1 -maxdepth 1 ! -name data ! -name config.json \
-            ! -name .pr_event_store ! -name .user_map.json -exec rm -rf {} +
+        find "$base" -mindepth 1 -maxdepth 1 ! -name data -exec rm -rf {} +
     fi
     log_info "卸载完成"
 }
