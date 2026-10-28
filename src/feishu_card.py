@@ -82,9 +82,8 @@ def _review_line(pr: dict[str, Any], reviews: list[dict[str, Any]] | None, fm: d
 
     parts = [f"{_fmt_user(u, fm)} 待审" for u in pending]
     parts += [f"**{t}** 待审" for t in teams]
-    parts += [
-        f"{_fmt_user(u, fm)} {'approved' if st == 'APPROVED' else 'requested changes'}" for u, st in verdict.items()
-    ]
+    # 已给出结论的 reviewer 不再 @
+    parts += [f"**{u}** {'approved' if st == 'APPROVED' else 'requested changes'}" for u, st in verdict.items()]
     return " · ".join(parts)
 
 
