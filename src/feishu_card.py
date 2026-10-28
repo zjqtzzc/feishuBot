@@ -63,9 +63,13 @@ def pr_state(pr: dict[str, Any]) -> str:
     return "draft" if pr.get("draft") else "open"
 
 
-def _review_line(pr: dict[str, Any], reviews: list[dict[str, Any]], fm: dict[str, str]) -> str:
+def _no_access(what: str, status: int) -> str:
+    return f"⚠️ 无法读取{what}（HTTP {status}，请检查 GitHub token 权限）"
+
+
+def _review_line(pr: dict[str, Any], reviews: list[dict[str, Any]] | None, fm: dict[str, str]) -> str:
     verdict: dict[str, str] = {}
-    for rv in reviews:
+    for rv in reviews or []:
         user = (rv.get("user") or {}).get("login", "")
         st = (rv.get("state") or "").upper()
         if st in ("APPROVED", "CHANGES_REQUESTED"):
@@ -93,15 +97,18 @@ def build_status_card(
     activity: dict[str, Any] | None,
     repo: str,
     feishu_map: dict[str, str] | None = None,
+    errors: dict[str, int] | None = None,
 ) -> dict:
+    """reviews / comments 为 None 表示无权限读取；errors 记录读取失败部分的 HTTP 状态码。"""
     fm = feishu_map or {}
+    errors = errors or {}
     state = pr_state(pr)
     number = pr.get("number")
     url = pr.get("html_url", "")
     title = f"{'[Draft] ' if state == 'draft' else ''}{pr.get('title', '')} #{number}"
 
-    ai = [c for c in comments if is_ai_comment(c)]
-    human_comments = len(comments) - len(ai)
+    ai = [c for c in comments or [] if is_ai_comment(c)]
+    human_comments = len(comments or []) - len(ai)
 
     if state in ("merged", "closed"):
         if state == "merged":
@@ -111,21 +118,34 @@ def build_status_card(
         parts = [repo, who, f"{pr.get('commits', 0)} commits"]
         if ai:
             parts.append(f"AI review {len(ai)} 轮")
+        if errors:
+            parts.append(_no_access("部分信息", next(iter(errors.values()))))
         lines = [" · ".join(parts) + f" · [查看 PR]({url})"]
         actions = []
     else:
         head = (pr.get("head") or {}).get("ref", "")
         base = (pr.get("base") or {}).get("ref", "")
         author = (pr.get("user") or {}).get("login", "")
-        lines = [
-            f"{repo} · **{author}** · `{head}` → `{base}`",
-            f"📁 {pr.get('changed_files', 0)} files "
-            f"<font color='green'>+{pr.get('additions', 0)}</font> "
-            f"<font color='red'>-{pr.get('deletions', 0)}</font> · {pr.get('commits', 0)} commits",
-        ]
+        lines = []
+        if "pr" in errors:
+            lines.append(_no_access(" PR 最新状态", errors["pr"]) + "，以下为事件中的数据")
+        lines.append(f"{repo} · **{author}** · `{head}` → `{base}`")
+        if "changed_files" in pr:
+            lines.append(
+                f"📁 {pr['changed_files']} files "
+                f"<font color='green'>+{pr.get('additions', 0)}</font> "
+                f"<font color='red'>-{pr.get('deletions', 0)}</font> · {pr.get('commits', 0)} commits"
+            )
+        else:
+            lines.append("📁 ⚠️ 无法读取改动统计")
         review_line = _review_line(pr, reviews, fm)
+        if reviews is None:
+            warn = _no_access(" reviews", errors.get("reviews", 0))
+            review_line = f"{review_line}  {warn}" if review_line else f"👀 {warn}"
         if review_line:
             lines.append(review_line)
+        if comments is None:
+            lines.append(f"🤖 {_no_access('评论和 AI review', errors.get('comments', 0))}")
         if ai:
             lines.append(f"🤖 AI 第 {len(ai)} 轮：{ai_conclusion(ai[-1].get('body') or '')}")
         if human_comments:

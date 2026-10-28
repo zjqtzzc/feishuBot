@@ -23,6 +23,8 @@ class Trigger:
     number: int
     # 最近动态（lark_md）；None 表示只刷新卡片、不改最近动态
     activity: str | None
+    # pull_request 事件自带的完整 PR 数据；读 PR 无权限时用它生成卡片
+    pr: dict[str, Any] | None = None
 
 
 def verify_signature(payload: bytes, sig: str, secret: str) -> bool:
@@ -123,4 +125,5 @@ def handle(
         return {"status": "ignored", "action": data.get("action") or "unknown"}, 200, None
     if not repo or not number:
         return {"error": "Missing repo/pr"}, 400, None
-    return {"status": "queued"}, 200, Trigger(repo, number, activity)
+    pr = data.get("pull_request") if event_type == "pull_request" else None
+    return {"status": "queued"}, 200, Trigger(repo, number, activity, pr)

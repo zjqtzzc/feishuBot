@@ -15,7 +15,15 @@ MAX_PAGES = 10
 
 
 class GitHubAPIError(Exception):
-    pass
+    def __init__(self, message: str, status: int | None = None, rate_limited: bool = False):
+        super().__init__(message)
+        self.status = status
+        self.rate_limited = rate_limited
+
+    @property
+    def permanent(self) -> bool:
+        """token 无效或无权限：重试也没用。网络错误、5xx、限流不算。"""
+        return self.status in (401, 403, 404) and not self.rate_limited
 
 
 class GitHubAPI:
@@ -34,7 +42,8 @@ class GitHubAPI:
             raise GitHubAPIError(f"GET {url} {type(e).__name__}") from e
         log.debug("GitHubAPI GET url=%s status=%s %.3fs", url, r.status_code, time.monotonic() - t0)
         if r.status_code != 200:
-            raise GitHubAPIError(f"GET {url} HTTP {r.status_code}")
+            rate_limited = r.headers.get("x-ratelimit-remaining") == "0" or r.status_code == 429
+            raise GitHubAPIError(f"GET {url} HTTP {r.status_code}", r.status_code, rate_limited)
         return r
 
     def _get_all(self, url):

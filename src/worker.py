@@ -6,6 +6,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from dataclasses import dataclass
 from typing import Any
 
 from src.card_store import CardStore, pr_key
@@ -26,6 +27,18 @@ MAX_RETRIES = 2
 RETRY_DELAY_SECONDS = 30
 
 
+@dataclass
+class _Job:
+    due: float
+    repo: str
+    number: int
+    # 最近动态 {"text", "at"}；None 表示不改
+    activity: dict[str, Any] | None
+    # webhook 自带的完整 PR 数据（仅 pull_request 事件），读 PR 无权限时用来生成卡片
+    pr: dict[str, Any] | None
+    attempt: int = 0
+
+
 class CardWorker:
     def __init__(self, cfg: Config, gh: GitHubAPI, store: CardStore, user_map: UserMap):
         self.cfg = cfg
@@ -33,64 +46,83 @@ class CardWorker:
         self.store = store
         self.user_map = user_map
         self._cond = threading.Condition()
-        # key → (到期时间, repo, number, 最近动态, 已重试次数)
-        self._pending: dict[str, tuple[float, str, int, dict[str, Any] | None, int]] = {}
+        self._pending: dict[str, _Job] = {}
 
     def submit(self, trig: Trigger) -> None:
         activity = {"text": trig.activity, "at": time.time()} if trig.activity else None
-        self._schedule(trig.repo, trig.number, activity, DEBOUNCE_SECONDS, 0)
+        self._schedule(_Job(0, trig.repo, trig.number, activity, trig.pr), DEBOUNCE_SECONDS)
 
-    def _schedule(self, repo: str, number: int, activity: dict[str, Any] | None, delay: float, attempt: int) -> None:
-        key = pr_key(repo, number)
+    def _schedule(self, job: _Job, delay: float) -> None:
+        key = pr_key(job.repo, job.number)
         with self._cond:
             old = self._pending.get(key)
-            if activity is None and old:
-                activity = old[3]
-            self._pending[key] = (time.monotonic() + delay, repo, number, activity, attempt)
+            if old:
+                job.activity = job.activity or old.activity
+                job.pr = job.pr or old.pr
+            job.due = time.monotonic() + delay
+            self._pending[key] = job
             self._cond.notify()
 
-    def _next_due(self) -> tuple[str, int, dict[str, Any] | None, int]:
+    def _next_due(self) -> _Job:
         with self._cond:
             while True:
                 if not self._pending:
                     self._cond.wait()
                     continue
-                key, item = min(self._pending.items(), key=lambda kv: kv[1][0])
-                wait = item[0] - time.monotonic()
+                key, job = min(self._pending.items(), key=lambda kv: kv[1].due)
+                wait = job.due - time.monotonic()
                 if wait <= 0:
                     del self._pending[key]
-                    return item[1:]
+                    return job
                 self._cond.wait(wait)
 
     def run(self) -> None:
         while True:
-            repo, number, activity, attempt = self._next_due()
+            job = self._next_due()
             try:
-                ok = self._refresh(repo, number, activity)
+                ok = self._refresh(job)
             except Exception:
-                log.exception("[%s#%s] refresh crashed", repo, number)
+                log.exception("[%s#%s] refresh crashed", job.repo, job.number)
                 ok = True
             if not ok:
-                if attempt < MAX_RETRIES:
-                    log.warning("[%s#%s] refresh failed, retry in %ss", repo, number, RETRY_DELAY_SECONDS)
-                    self._schedule(repo, number, activity, RETRY_DELAY_SECONDS, attempt + 1)
+                if job.attempt < MAX_RETRIES:
+                    log.warning("[%s#%s] refresh failed, retry in %ss", job.repo, job.number, RETRY_DELAY_SECONDS)
+                    job.attempt += 1
+                    self._schedule(job, RETRY_DELAY_SECONDS)
                 else:
-                    log.error("[%s#%s] refresh failed, giving up", repo, number)
+                    log.error("[%s#%s] refresh failed, giving up", job.repo, job.number)
 
-    def _refresh(self, repo: str, number: int, activity: dict[str, Any] | None) -> bool:
-        """返回 False 表示可重试的失败。"""
+    def _refresh(self, job: _Job) -> bool:
+        """返回 False 表示可重试的失败（网络、5xx、限流）。无权限（401/403/404）不重试，在卡片上提示。"""
+        repo, number = job.repo, job.number
         ctx = f"[{repo}#{number}]"
         key = pr_key(repo, number)
         rec = self.store.get(key)
+        # 读取失败的部分：{"pr" | "reviews" | "comments": HTTP 状态码}
+        errors: dict[str, int] = {}
+
+        def fetch(name: str, fn):
+            try:
+                return fn(repo, number)
+            except GitHubAPIError as e:
+                if not e.permanent:
+                    raise
+                log.warning("%s GitHub no access: %s", ctx, e)
+                errors[name] = e.status
+                return None
+
         try:
-            pr = self.gh.get_pull(repo, number)
+            pr = fetch("pr", self.gh.get_pull) or job.pr
+            if pr is None:
+                log.warning("%s no PR data, card unchanged", ctx)
+                return True
             state = pr_state(pr)
             # 未发过卡片且不需要发（Draft / 已关闭）时不必再拉 reviews 和评论
             if not rec and state != "open":
                 log.info("%s skip state=%s (no card)", ctx, state)
                 return True
-            reviews = self.gh.list_reviews(repo, number)
-            comments = self.gh.list_issue_comments(repo, number)
+            reviews = fetch("reviews", self.gh.list_reviews)
+            comments = fetch("comments", self.gh.list_issue_comments)
         except GitHubAPIError as e:
             log.warning("%s GitHub error: %s", ctx, e)
             return False
@@ -99,8 +131,8 @@ class CardWorker:
         if not token:
             return False
 
-        activity = activity or (rec or {}).get("activity")
-        card = build_status_card(pr, reviews, comments, activity, repo, self.user_map.as_dict())
+        activity = job.activity or (rec or {}).get("activity")
+        card = build_status_card(pr, reviews, comments, activity, repo, self.user_map.as_dict(), errors)
         closed = state in ("merged", "closed")
         closed_at = ((rec or {}).get("closed_at") or time.time()) if closed else None
 
