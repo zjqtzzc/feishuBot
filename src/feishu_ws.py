@@ -115,9 +115,8 @@ def _dispatch(
     mentions: list[dict],
     user_map: UserMap,
     cfg: Config,
-    token_file: str,
 ) -> None:
-    token = get_tenant_access_token(cfg.app_id, cfg.app_secret, token_file)
+    token = get_tenant_access_token(cfg.app_id, cfg.app_secret)
     if not token:
         log.warning("No token for reply")
         return
@@ -200,14 +199,14 @@ def _dispatch(
 # ── 事件回调 ────────────────────────────────────────────
 
 
-def _make_event_handler(user_map: UserMap, cfg: Config, token_file: str) -> EventDispatcherHandler:
+def _make_event_handler(user_map: UserMap, cfg: Config) -> EventDispatcherHandler:
     def on_im_message(event: CustomizedEvent) -> None:
         event_data = event.event or {}
         text, chat_id, _is_group, mentions = _parse_msg_content(event_data)
         sender_oid = _sender_open_id(event_data)
         if text and chat_id:
             log.info("WS message: chat=%s sender=%s text=%s", chat_id[:12], sender_oid[:12], text[:60])
-            _dispatch(text, chat_id, sender_oid, mentions, user_map, cfg, token_file)
+            _dispatch(text, chat_id, sender_oid, mentions, user_map, cfg)
 
     _noop = lambda _: None
     return (
@@ -222,9 +221,9 @@ def _make_event_handler(user_map: UserMap, cfg: Config, token_file: str) -> Even
 # ── 线程入口 ────────────────────────────────────────────
 
 
-def start_ws_client(cfg: Config, token_file: str, user_map: UserMap) -> None:
+def start_ws_client(cfg: Config, user_map: UserMap) -> None:
     """启动 WebSocket 客户端（阻塞）。应在独立线程中调用。"""
-    event_handler = _make_event_handler(user_map, cfg, token_file)
+    event_handler = _make_event_handler(user_map, cfg)
     client = WsClient(
         app_id=cfg.app_id,
         app_secret=cfg.app_secret,

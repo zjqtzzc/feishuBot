@@ -1,272 +1,155 @@
 # -*- coding: utf-8 -*-
-"""飞书时间线卡片：从 PR 记录构建 interactive 卡片"""
+"""飞书状态卡片：根据 GitHub 当前的 PR / reviews / 评论生成 interactive 卡片"""
 
 from __future__ import annotations
 
 import re
-from typing import Any, Callable
+from datetime import datetime, timedelta, timezone
+from typing import Any
 
-from src.timeline_event_type import TimelineEventType
+# 卡片头部颜色
+TEMPLATE = {"open": "red", "draft": "grey", "merged": "green", "closed": "grey"}
 
-# 渲染函数签名: (event_dict, feishu_map_or_none) -> str
-Renderer = Callable[[dict[str, Any], dict[str, str] | None], str]
-
-# 卡片模板颜色映射
-# 用于根据 PR 状态设置卡片头部颜色
-TYPE_TEMPLATE = {"open": "red", "merged": "green", "closed": "grey"}
-
-# PR 状态头部英文标签
-# 与 handlers.pr_state_from_payload 一致，共 3 种状态
-PR_STATE_HEADER_EN = {"open": "Open", "merged": "Merged", "closed": "Closed"}
-
-# 单个事件的最大字符数
-# 超过此限制的事件内容会被截断
-MAX_SINGLE_EVENT_CHARS = 2000
-
-# 整个时间线的最大字符数
-# 超过此限制的事件会被省略
-MAX_TIMELINE_CHARS = 22000
-
-# Issue 评论正文的最大字符数
-# 超过此限制的评论会被截断
-MAX_ISSUE_COMMENT_BODY = 100
-
-# GitHub Actions 机器人登录名
-# GITHUB_TOKEN 发评论时作者一般为 github-actions[bot]；少数环境可能为 github-actions
+# GitHub Actions 机器人登录名：AI review 由它以 issue comment 发出
 GITHUB_ACTIONS_LOGINS = frozenset({"github-actions[bot]", "github-actions"})
 
+AI_FORMAT_ERROR = "⚠️ AI Review 格式匹配失败，请查看 GitHub 原文"
 
-def strip_blockquote_lines(text: str) -> str:
-    """去掉 Markdown 引用行（> …），回复里只保留用户自写内容。"""
-    out: list[str] = []
-    for line in text.splitlines():
-        if line.lstrip().startswith(">"):
-            continue
-        out.append(line)
-    return "\n".join(out).strip()
-
-
-def truncate_issue_comment_body(s: str, max_len: int = MAX_ISSUE_COMMENT_BODY) -> str:
-    s = s.strip()
-    if len(s) <= max_len:
-        return s
-    return s[:max_len] + "…"
+CST = timezone(timedelta(hours=8))
 
 
 def truncate_text(s: str, max_len: int) -> str:
     s = s.strip()
     if len(s) <= max_len:
         return s
-    return s[: max_len - 8] + "\n…（已截断）"
+    return s[: max_len - 1] + "…"
 
 
-def _fmt_user(name: str, fm: dict[str, str] | None = None) -> str:
-    """渲染用户名：有飞书映射则用 @mention，否则回退粗体。"""
-    if not name:
-        return ""
-    fm = fm or {}
+def _fmt_user(name: str, fm: dict[str, str]) -> str:
+    """有飞书映射则 @mention，否则粗体。"""
     fid = fm.get(name)
-    if fid:
-        return f"<at id={fid}>{name}</at>"
-    return f"**{name}**"
+    return f"<at id={fid}>{name}</at>" if fid else f"**{name}**"
+
+
+def is_ai_comment(comment: dict[str, Any]) -> bool:
+    user = comment.get("user") or {}
+    if user.get("type") != "Bot":
+        return False
+    return (user.get("login") or "").strip().lower() in GITHUB_ACTIONS_LOGINS
 
 
 def _extract_markdown_section(body: str, heading_line: str) -> str | None:
     if heading_line not in body:
         return None
     after = body.split(heading_line, 1)[1]
-    parts = re.split(r"\n##\s+", after, maxsplit=1)
-    text = parts[0].strip()
-    return text if text else None
+    text = re.split(r"\n##\s+", after, maxsplit=1)[0].strip()
+    return text or None
 
 
-def extract_ai_review_for_card(body: str) -> str:
-    """提取「## 总结」段落用于飞书卡片展示。"""
-    t = _extract_markdown_section(body, "## 总结")
-    return t or "⚠️ AI Review 格式匹配失败，请查看 GitHub 原文"
+def ai_conclusion(body: str) -> str:
+    """取「## 总结」段落里的「结论：」一行。"""
+    section = _extract_markdown_section(body, "## 总结")
+    if not section:
+        return AI_FORMAT_ERROR
+    m = re.search(r"结论\**\s*[：:]\s*\**\s*(.+)", section)
+    return truncate_text(m.group(1) if m else section, 200)
 
 
-
-def is_claude_ai_comment(_body: str, comment: dict[str, Any] | None = None) -> bool:
-    """识别 AI review：仅 GitHub Actions 机器人发帖；排除楼中楼回复。"""
-    if not comment or comment.get("in_reply_to_id"):
-        return False
-    user = comment.get("user") or {}
-    if user.get("type") != "Bot":
-        return False
-    login = (user.get("login") or "").strip().lower()
-    return login in GITHUB_ACTIONS_LOGINS
+def pr_state(pr: dict[str, Any]) -> str:
+    if pr.get("merged"):
+        return "merged"
+    if pr.get("state") == "closed":
+        return "closed"
+    return "draft" if pr.get("draft") else "open"
 
 
-def _render_user_action(ev: dict[str, Any], action: str, fm: dict[str, str] | None = None, user_key: str = "author") -> str:
-    user = ev.get(user_key, "")
-    return f"**{user}** {action}"
+def _review_line(pr: dict[str, Any], reviews: list[dict[str, Any]], fm: dict[str, str]) -> str:
+    verdict: dict[str, str] = {}
+    for rv in reviews:
+        user = (rv.get("user") or {}).get("login", "")
+        st = (rv.get("state") or "").upper()
+        if st in ("APPROVED", "CHANGES_REQUESTED"):
+            verdict[user] = st
+        elif st == "DISMISSED":
+            verdict.pop(user, None)
+    pending = [u.get("login", "") for u in pr.get("requested_reviewers") or []]
+    pending = [u for u in pending if u not in verdict]
+    teams = [f"team/{t.get('slug') or t.get('name')}" for t in pr.get("requested_teams") or []]
+
+    parts = [f"👀 {_fmt_user(u, fm)}" for u in pending]
+    parts += [f"👀 **{t}**" for t in teams]
+    parts += [f"{'✅' if st == 'APPROVED' else '❌'} {_fmt_user(u, fm)}" for u, st in verdict.items()]
+    return "  ".join(parts)
 
 
-def _render_with_content(ev: dict[str, Any], content_key: str, fm: dict[str, str] | None = None, author_key: str = "author") -> str:
-    author = ev.get(author_key, "")
-    content = ev.get(content_key, "")
-    return f"**{author}**\n{content}"
+def _fmt_time(ts: float) -> str:
+    return datetime.fromtimestamp(ts, CST).strftime("%m-%d %H:%M")
 
 
-def _render_pr_open(ev: dict[str, Any], fm: dict[str, str] | None = None) -> str:
-    title = ev.get("title", "")
-    num = ev.get("pr_number", "")
-    author = ev.get("author", "")
-    fs = ev.get("file_stat", "")
-    base = f"**{author}** opened\n**{title}** #{num}"
-    return f"{base}\n{fs}" if fs else base
-
-
-def _render_review_requested(ev: dict[str, Any], fm: dict[str, str] | None = None) -> str:
-    rq = ev.get("requester", "")
-    rv = ev.get("reviewer", "")
-    return f"**{rq}** requested {_fmt_user(rv, fm)}"
-
-
-def _render_pr_ready(ev: dict[str, Any], fm: dict[str, str] | None = None) -> str:
-    return _render_user_action(ev, "marked ready for review", fm)
-
-
-def _render_pr_push(ev: dict[str, Any], fm: dict[str, str] | None = None) -> str:
-    author = ev.get("author", "")
-    n = ev.get("commit_count", 0)
-    branch = ev.get("branch", "")
-    msgs = [str(m).strip() for m in (ev.get("commit_messages") or []) if str(m).strip()]
-    head = f"**{author}** pushed **{n}** commit(s) to `{branch}`"
-    return f"{head}\n{truncate_text(msgs[0], 150)}" if msgs else head
-
-
-def _render_pr_reopen(ev: dict[str, Any], fm: dict[str, str] | None = None) -> str:
-    return _render_user_action(ev, "reopened", fm)
-
-
-def _render_pr_close(ev: dict[str, Any], fm: dict[str, str] | None = None) -> str:
-    return _render_user_action(ev, "closed", fm)
-
-
-def _render_pr_merge(ev: dict[str, Any], fm: dict[str, str] | None = None) -> str:
-    return _render_user_action(ev, "merged", fm, user_key="merger")
-
-
-def _render_ai_review(ev: dict[str, Any], fm: dict[str, str] | None = None) -> str:
-    body_text = ev.get("final_opinion") or ev.get("summary", "")
-    author = ev.get("author", "")
-    return f"**{author}**\n{body_text}"
-
-
-def _render_pr_comment(ev: dict[str, Any], fm: dict[str, str] | None = None) -> str:
-    return _render_with_content(ev, "body", fm)
-
-
-def _render_human_review(ev: dict[str, Any], fm: dict[str, str] | None = None) -> str:
-    st = (ev.get("state") or "").lower()
-    reviewer = ev.get("reviewer", "")
-    body = (ev.get("body") or "").strip()
-
-    action_map = {
-        "approved": "approved",
-        "changes_requested": "changes requested",
-        "dismissed": "dismissed"
-    }
-
-    action = action_map.get(st, "")
-    head = f"{_fmt_user(reviewer, fm)}{f' {action}' if action else ''}"
-    return f"{head}\n{body}" if body else head
-
-
-def _render_unknown(ev: dict[str, Any], fm: dict[str, str] | None = None) -> str:
-    t = ev.get("type", "")
-    return f"（未知事件 `{t}`）"
-
-
-_TIMELINE_RENDERERS: dict[str, Renderer] = {
-    TimelineEventType.PR_OPEN.value: _render_pr_open,
-    TimelineEventType.REVIEW_REQUESTED.value: _render_review_requested,
-    TimelineEventType.PR_READY.value: _render_pr_ready,
-    TimelineEventType.PR_PUSH.value: _render_pr_push,
-    TimelineEventType.PR_REOPEN.value: _render_pr_reopen,
-    TimelineEventType.PR_CLOSE.value: _render_pr_close,
-    TimelineEventType.PR_MERGE.value: _render_pr_merge,
-    TimelineEventType.AI_REVIEW.value: _render_ai_review,
-    TimelineEventType.PR_COMMENT.value: _render_pr_comment,
-    TimelineEventType.HUMAN_REVIEW.value: _render_human_review,
-}
-
-
-def _render_one(ev: dict[str, Any], fm: dict[str, str] | None = None) -> str:
-    t = ev.get("type", "")
-    fn = _TIMELINE_RENDERERS.get(t)
-    if fn:
-        return fn(ev, fm)
-    return _render_unknown(ev, fm)
-
-
-def _trim_events(events: list[dict[str, Any]], budget: int) -> tuple[list[dict[str, Any]], bool]:
-    kept: list[dict[str, Any]] = []
-    total = 0
-    omitted = False
-    for ev in reversed(events):
-        chunk = len(_render_one(ev))
-        if kept and total + chunk > budget:
-            omitted = True
-            break
-        kept.append(ev)
-        total += chunk
-    kept.reverse()
-    if len(kept) < len(events):
-        omitted = True
-    return kept, omitted
-
-
-def build_timeline_card(record: dict[str, Any], feishu_map: dict[str, str] | None = None) -> dict:
-    repo = record.get("repo", "")
-    pr_url = record.get("pr_url", "")
-    pr_state = record.get("pr_state", "open")
-    events = record.get("events") or []
+def build_status_card(
+    pr: dict[str, Any],
+    reviews: list[dict[str, Any]],
+    comments: list[dict[str, Any]],
+    activity: dict[str, Any] | None,
+    repo: str,
+    feishu_map: dict[str, str] | None = None,
+) -> dict:
     fm = feishu_map or {}
+    state = pr_state(pr)
+    number = pr.get("number")
+    url = pr.get("html_url", "")
+    title = f"{'[Draft] ' if state == 'draft' else ''}{pr.get('title', '')} #{number}"
 
-    template = TYPE_TEMPLATE.get(pr_state, "red")
-    state_label = PR_STATE_HEADER_EN.get(pr_state, pr_state.capitalize())
-    header_title = truncate_text(f"{repo} · {state_label}", 200)
+    ai = [c for c in comments if is_ai_comment(c)]
+    human_comments = len(comments) - len(ai)
 
-    trimmed, omitted = _trim_events(events, MAX_TIMELINE_CHARS)
-    elements: list[dict[str, Any]] = []
-
-    if omitted:
-        n = len(events) - len(trimmed)
-        elements.append(
+    if state in ("merged", "closed"):
+        if state == "merged":
+            who = f"**{(pr.get('merged_by') or {}).get('login', '')}** merged"
+        else:
+            who = "Closed"
+        parts = [repo, who, f"{pr.get('commits', 0)} commits"]
+        if ai:
+            parts.append(f"AI review {len(ai)} 轮")
+        lines = [" · ".join(parts) + f" · [查看 PR]({url})"]
+        actions = []
+    else:
+        head = (pr.get("head") or {}).get("ref", "")
+        base = (pr.get("base") or {}).get("ref", "")
+        author = (pr.get("user") or {}).get("login", "")
+        lines = [
+            f"{repo} · **{author}** · `{head}` → `{base}`",
+            f"📁 {pr.get('changed_files', 0)} files "
+            f"<font color='green'>+{pr.get('additions', 0)}</font> "
+            f"<font color='red'>-{pr.get('deletions', 0)}</font> · {pr.get('commits', 0)} commits",
+        ]
+        review_line = _review_line(pr, reviews, fm)
+        if review_line:
+            lines.append(review_line)
+        if ai:
+            lines.append(f"🤖 AI 第 {len(ai)} 轮：{ai_conclusion(ai[-1].get('body') or '')}")
+        if human_comments:
+            lines.append(f"💬 {human_comments} 条评论")
+        if activity and activity.get("text"):
+            lines.append(f"🕒 {activity['text']} · {_fmt_time(activity['at'])}")
+        actions = [
             {
-                "tag": "div",
-                "text": {
-                    "tag": "lark_md",
-                    "content": f"⏱ 较早 **{n}** 条事件已省略展示，完整记录见 GitHub。",
-                },
+                "tag": "action",
+                "actions": [
+                    {
+                        "tag": "button",
+                        "text": {"content": "查看 PR", "tag": "plain_text"},
+                        "type": "primary",
+                        "url": url,
+                    }
+                ],
             }
-        )
-        elements.append({"tag": "hr"})
-
-    for i, ev in enumerate(trimmed):
-        if i > 0:
-            elements.append({"tag": "hr"})
-        text = truncate_text(_render_one(ev, fm), MAX_SINGLE_EVENT_CHARS)
-        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": text}})
-
-    elements.append(
-        {
-            "tag": "action",
-            "actions": [
-                {
-                    "tag": "button",
-                    "text": {"content": "查看 PR", "tag": "plain_text"},
-                    "type": "primary",
-                    "url": pr_url,
-                }
-            ],
-        }
-    )
+        ]
 
     return {
-        "header": {"template": template, "title": {"content": header_title, "tag": "plain_text"}},
-        "elements": elements,
+        "header": {
+            "template": TEMPLATE[state],
+            "title": {"content": truncate_text(title, 200), "tag": "plain_text"},
+        },
+        "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines)}}, *actions],
     }

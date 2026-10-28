@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""HTTP 服务：GitHub Webhook → handlers"""
+"""HTTP 服务：GitHub Webhook 验签归类后立即返回，卡片刷新交给后台 worker"""
 
 import json
 import logging
@@ -11,15 +11,14 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
+from src.card_store import CARD_STORE_FILENAME, CardStore
 from src.config import load_config, project_root
-from src.event_store import EVENT_STORE_FILENAME
-from src.feishu_credential import FEISHU_TOKEN_FILENAME
 from src.feishu_ws import start_ws_client
 from src.github_api import GitHubAPI
-from src.handlers import handle
+from src.handlers import HANDLED_EVENTS, handle
 from src.user_map import USER_MAP_FILENAME, UserMap
-from src.feishu_sync import set_user_map
 from src.webhook_logging import ctx_tag, setup_logging, strip_log_fields
+from src.worker import CardWorker
 
 log = logging.getLogger(__name__)
 
@@ -30,17 +29,14 @@ REQUEST_TIMEOUT = 30
 def _setup():
     root = project_root()
     cfg = load_config()
-    token_file = os.path.join(root, FEISHU_TOKEN_FILENAME)
-    store_path = os.path.join(root, EVENT_STORE_FILENAME)
-    gh = GitHubAPI(token=cfg.github_token)
-    user_map_file = os.path.join(root, USER_MAP_FILENAME)
-    user_map = UserMap(user_map_file)
-    set_user_map(user_map)
-    return cfg, token_file, store_path, gh, user_map
+    user_map = UserMap(os.path.join(root, USER_MAP_FILENAME))
+    store = CardStore(os.path.join(root, CARD_STORE_FILENAME))
+    worker = CardWorker(cfg, GitHubAPI(token=cfg.github_token), store, user_map)
+    return cfg, user_map, worker
 
 
 class Handler(BaseHTTPRequestHandler):
-    cfg, token_file, store_path, github_api, user_map = _setup()
+    cfg, user_map, worker = _setup()
 
     def do_POST(self):
         if urlparse(self.path).path not in ("/", "/webhook"):
@@ -56,7 +52,7 @@ class Handler(BaseHTTPRequestHandler):
         delivery = (self.headers.get("X-GitHub-Delivery") or "")[:8]
 
         data = None
-        if event_type in ("pull_request", "pull_request_review", "issue_comment"):
+        if event_type in HANDLED_EVENTS:
             try:
                 data = json.loads(raw.decode("utf-8")) if raw else None
             except json.JSONDecodeError:
@@ -65,16 +61,15 @@ class Handler(BaseHTTPRequestHandler):
 
         tag, gh_action = ctx_tag(event_type, data)
         t0 = time.monotonic()
-        body, code = handle(
+        body, code, trigger = handle(
             raw,
             self.headers.get("X-Hub-Signature-256", ""),
             event_type,
             data,
             self.cfg,
-            self.token_file,
-            self.store_path,
-            self.github_api,
         )
+        if trigger:
+            self.worker.submit(trigger)
         elapsed = time.monotonic() - t0
         status = body.get("status") or body.get("error", "")
         detail = body.get("detail", "")
@@ -122,13 +117,13 @@ def main():
     setup_logging()
     port = Handler.cfg.github_webhook_port
 
-    ws_thread = threading.Thread(
+    threading.Thread(target=Handler.worker.run, daemon=True, name="card-worker").start()
+    threading.Thread(
         target=start_ws_client,
-        args=(Handler.cfg, Handler.token_file, Handler.user_map),
+        args=(Handler.cfg, Handler.user_map),
         daemon=True,
         name="feishu-ws",
-    )
-    ws_thread.start()
+    ).start()
 
     try:
         QuietHTTPServer(("0.0.0.0", port), Handler).serve_forever()
