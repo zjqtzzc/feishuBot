@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""GitHub API：读取 PR 当前状态（PR、reviews、评论）"""
+"""GitHub API：读取 PR 当前状态（PR、reviews、评论、改动文件）"""
 
 import logging
 import time
@@ -66,3 +66,6 @@ class GitHubAPI:
 
     def list_issue_comments(self, repo_name, pr_number):
         return self._get_all(f"{self.base_url}/repos/{repo_name}/issues/{pr_number}/comments")
+
+    def list_files(self, repo_name, pr_number):
+        return self._get_all(f"{self.base_url}/repos/{repo_name}/pulls/{pr_number}/files")

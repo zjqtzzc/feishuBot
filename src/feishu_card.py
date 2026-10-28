@@ -24,6 +24,9 @@ AI_FORMAT_ERROR = "AI Review 格式匹配失败，请查看 GitHub 原文"
 
 CST = timezone(timedelta(hours=8))
 
+# 改动文件明细最多展示的行数
+MAX_FILE_GROUPS = 8
+
 
 def truncate_text(s: str, max_len: int) -> str:
     s = s.strip()
@@ -118,17 +121,87 @@ def _ai_line(ai: list[dict[str, Any]]) -> str:
     return f"{tag} {conclusion} {_grey(f'第 {len(ai)} 轮')}"
 
 
-def _stat_line(pr: dict[str, Any], errors: dict[str, int]) -> str:
-    head = (pr.get("head") or {}).get("ref", "")
-    base = (pr.get("base") or {}).get("ref", "")
-    branch = _grey(f"{head} → {base}")
-    if "changed_files" not in pr:
-        return f"{branch} {_no_access('改动统计', errors.get('pr', 0))}"
-    files = _grey(f"· {pr['changed_files']} files")
-    adds = f"<font color='green'>+{pr.get('additions', 0)}</font>"
-    dels = f"<font color='red'>-{pr.get('deletions', 0)}</font>"
-    commits = pr.get("commits", 0)
-    return f"{branch} {files} {adds} {dels} {_grey(f'· {commits} commits')}"
+def _group_files(files: list[dict[str, Any]], depth: int) -> dict[str, list]:
+    """按前 depth 层路径分组：{路径: [增, 删, 文件数, 唯一文件的完整路径]}。目录以 / 结尾。"""
+    out: dict[str, list] = {}
+    for f in files:
+        name = f.get("filename") or ""
+        parts = name.split("/")
+        key = "/".join(parts[:depth]) + "/" if len(parts) > depth else name
+        g = out.setdefault(key, [0, 0, 0, name])
+        g[0] += f.get("additions", 0)
+        g[1] += f.get("deletions", 0)
+        g[2] += 1
+    return out
+
+
+def summarize_files(files: list[dict[str, Any]]) -> list[tuple[str, int, int, int]]:
+    """改动文件按目录汇总，返回 [(路径, 增, 删, 文件数)]，按路径排序。
+
+    分组粒度自动选择：分组数不超过 MAX_FILE_GROUPS 的前提下取分组最多、且最具体（最深）的一层。
+    只含一个文件的分组直接显示该文件；路径过深时显示时省略中间部分。
+    最浅一层仍超出上限时，保留改动最多的几组，其余合并为「其他 N 项」放在最后。
+    """
+    if not files:
+        return []
+    max_depth = max(len((f.get("filename") or "").split("/")) for f in files)
+    best = _group_files(files, 1)
+    for depth in range(2, max_depth + 1):
+        groups = _group_files(files, depth)
+        if len(best) <= len(groups) <= MAX_FILE_GROUPS:
+            best = groups
+    rows = [(name if count == 1 else key, adds, dels, count) for key, (adds, dels, count, name) in best.items()]
+    other = None
+    if len(rows) > MAX_FILE_GROUPS:
+        rows.sort(key=lambda r: -(r[1] + r[2]))
+        rest = rows[MAX_FILE_GROUPS - 1:]
+        rows = rows[: MAX_FILE_GROUPS - 1]
+        other = (f"其他 {len(rest)} 项", sum(r[1] for r in rest), sum(r[2] for r in rest), sum(r[3] for r in rest))
+    rows.sort(key=lambda r: r[0])
+    return rows + ([other] if other else [])
+
+
+def _short_path(path: str) -> str:
+    """层级太深时省略中间：a/b/c/d/e/ → a/…/d/e/"""
+    is_dir = path.endswith("/")
+    parts = path.rstrip("/").split("/")
+    if len(parts) > 4:
+        parts = [parts[0], "…", *parts[-2:]]
+    return "/".join(parts) + ("/" if is_dir else "")
+
+
+def _files_panel(pr: dict[str, Any], files: list[dict[str, Any]] | None, errors: dict[str, int]) -> dict:
+    """折叠面板：标题为改动合计，展开后为按目录汇总的表格。"""
+    if "changed_files" in pr:
+        title = (
+            f"{pr['changed_files']} files <font color='green'>+{pr.get('additions', 0)}</font> "
+            f"<font color='red'>-{pr.get('deletions', 0)}</font> · {pr.get('commits', 0)} commits"
+        )
+    else:
+        title = "改动文件"
+    if files is None:
+        content = _no_access("改动文件", errors.get("files") or errors.get("pr", 0))
+    elif not files:
+        content = _grey("没有改动文件")
+    else:
+        lines = ["| 路径 | 文件 | 改动 |", "| --- | --- | --- |"]
+        for path, adds, dels, count in summarize_files(files):
+            name = path if path.startswith("其他 ") else f"`{_short_path(path)}`"
+            lines.append(
+                f"| {name} | {count} | <font color='green'>+{adds}</font> <font color='red'>-{dels}</font> |"
+            )
+        content = "\n".join(lines)
+    return {
+        "tag": "collapsible_panel",
+        "expanded": False,
+        "header": {
+            "title": {"tag": "markdown", "content": title},
+            "icon": {"tag": "standard_icon", "token": "down-small-ccm_outlined", "size": "16px 16px"},
+            "icon_position": "follow_text",
+            "icon_expanded_angle": -180,
+        },
+        "elements": [{"tag": "markdown", "content": content, "text_size": "notation"}],
+    }
 
 
 def _fmt_time(ts: float) -> str:
@@ -147,11 +220,13 @@ def build_status_card(
     repo: str,
     feishu_map: dict[str, str] | None = None,
     errors: dict[str, int] | None = None,
+    files: list[dict[str, Any]] | None = None,
 ) -> dict:
-    """reviews / comments 为 None 表示无权限读取；errors 记录读取失败部分的 HTTP 状态码。
+    """reviews / comments / files 为 None 表示无权限读取；errors 记录读取失败部分的 HTTP 状态码。
 
     头部：PR 标题，副标题「仓库 #号 · 作者」，状态标签。
-    正文：reviewer 与 AI 结论。底部小号字：分支、改动统计、评论数、最近动态，以及「查看 PR」按钮。
+    正文：reviewer 与 AI 结论；折叠面板（标题为改动合计，展开为按目录汇总的改动文件）；
+    底部小号字：分支、评论数、最近动态；「查看 PR」按钮。
     合并/关闭后只剩一行小号字，末尾为「查看 PR」链接。
     """
     fm = feishu_map or {}
@@ -189,18 +264,20 @@ def build_status_card(
         if ai:
             main.append(_ai_line(ai))
 
-        meta.append(_stat_line(pr, errors))
-        tail = []
+        head = (pr.get("head") or {}).get("ref", "")
+        base = (pr.get("base") or {}).get("ref", "")
+        tail = [f"{head} → {base}"]
         if human_comments:
             tail.append(f"{human_comments} 条评论")
         if activity and activity.get("text"):
             tail.append(f"最近 {activity['text']} · {_fmt_time(activity['at'])}")
-        if tail:
-            meta.append(_grey(" · ".join(tail)))
+        meta.append(_grey(" · ".join(tail)))
 
     elements = []
     if main:
         elements.append(_markdown(main))
+    if state not in ("merged", "closed"):
+        elements.append(_files_panel(pr, files, errors))
     elements.append(_markdown(meta, "notation"))
     if state not in ("merged", "closed"):
         elements.append(

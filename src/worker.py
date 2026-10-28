@@ -123,6 +123,8 @@ class CardWorker:
                 return True
             reviews = fetch("reviews", self.gh.list_reviews)
             comments = fetch("comments", self.gh.list_issue_comments)
+            # 合并/关闭后的卡片只有一行，不需要文件明细
+            files = None if state in ("merged", "closed") else fetch("files", self.gh.list_files)
         except GitHubAPIError as e:
             log.warning("%s GitHub error: %s", ctx, e)
             return False
@@ -132,7 +134,7 @@ class CardWorker:
             return False
 
         activity = job.activity or (rec or {}).get("activity")
-        card = build_status_card(pr, reviews, comments, activity, repo, self.user_map.as_dict(), errors)
+        card = build_status_card(pr, reviews, comments, activity, repo, self.user_map.as_dict(), errors, files)
         closed = state in ("merged", "closed")
         closed_at = ((rec or {}).get("closed_at") or time.time()) if closed else None
 
