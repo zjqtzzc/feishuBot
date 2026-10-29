@@ -25,6 +25,11 @@ CST = timezone(timedelta(hours=8))
 # 改动文件明细最多展示的行数
 MAX_FILE_GROUPS = 8
 
+# 不计入 CI 的检查（名字小写包含即排除）：AI review 已单独显示
+CI_EXCLUDE = ("ai-review",)
+CI_FAILED = frozenset({"failure", "timed_out", "startup_failure", "action_required"})
+CI_WAITING = frozenset({"queued", "waiting", "pending", "requested"})
+
 
 def truncate_text(s: str, max_len: int) -> str:
     s = s.strip()
@@ -215,6 +220,67 @@ def _fmt_time(ts: float) -> str:
     return datetime.fromtimestamp(ts, CST).strftime("%m-%d %H:%M")
 
 
+def _parse_iso(s: str | None) -> float | None:
+    if not s:
+        return None
+    return datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+
+
+def _ci_runs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [r for r in runs if not any(x in (r.get("name") or "").lower() for x in CI_EXCLUDE)]
+
+
+def failed_ci_run(runs: list[dict[str, Any]]) -> dict[str, Any] | None:
+    return next((r for r in _ci_runs(runs) if r.get("conclusion") in CI_FAILED), None)
+
+
+def failed_step_name(job: dict[str, Any]) -> str | None:
+    return next((s.get("name") for s in job.get("steps") or [] if s.get("conclusion") == "failure"), None)
+
+
+def _duration(run: dict[str, Any]) -> str:
+    start, end = _parse_iso(run.get("started_at")), _parse_iso(run.get("completed_at"))
+    if not start or not end:
+        return ""
+    minutes = round((end - start) / 60)
+    if minutes < 60:
+        return f"用时 {max(minutes, 1)} 分钟"
+    return f"用时 {minutes // 60} 小时 {minutes % 60} 分钟"
+
+
+def _ci_line(runs: list[dict[str, Any]] | None, failed_step: str | None, errors: dict[str, int]) -> str:
+    """CI 状态一行。runs 为 None 表示无权限读取；没有 CI（如 PR 不针对 develop）时返回空串。"""
+    if runs is None:
+        return _no_access(" CI 状态", errors.get("ci", 0))
+    runs = _ci_runs(runs)
+    if not runs:
+        return ""
+    many = len(runs) > 1
+    failed = [r for r in runs if r.get("conclusion") in CI_FAILED]
+    if failed:
+        r = failed[0]
+        name = f"{r.get('name')} " if many else ""
+        if "ci_steps" in errors:
+            where = name + _no_access("失败步骤", errors["ci_steps"])
+        else:
+            where = f"{name}失败于「{failed_step}」" if failed_step else name.strip()
+        parts = [p for p in (f"{len(failed)}/{len(runs)} 失败" if many else "", where, _duration(r)) if p]
+        parts.append(f"[查看日志]({r.get('html_url', '')})")
+        return f"{_tag('CI 失败', 'red')} " + " · ".join(parts)
+    running = [r for r in runs if r.get("status") == "in_progress"]
+    if running:
+        start = _parse_iso(running[0].get("started_at"))
+        return f"{_tag('CI 运行中', 'blue')} " + (_grey(f"{_fmt_time(start)} 开始") if start else "")
+    waiting = [r for r in runs if r.get("status") in CI_WAITING]
+    if waiting:
+        start = _parse_iso(waiting[0].get("started_at"))
+        return f"{_tag('CI 排队中', 'neutral')} " + (_grey(f"{_fmt_time(start)} 开始排队") if start else "")
+    if any(r.get("conclusion") == "cancelled" for r in runs):
+        return _tag("CI 已取消", "neutral")
+    longest = max(runs, key=lambda r: (_parse_iso(r.get("completed_at")) or 0) - (_parse_iso(r.get("started_at")) or 0))
+    return f"{_tag('CI 通过', 'green')} " + _grey(_duration(longest))
+
+
 def _markdown(lines: list[str], text_size: str = "normal") -> dict:
     return {"tag": "markdown", "content": "\n".join(lines), "text_size": text_size}
 
@@ -228,11 +294,13 @@ def build_status_card(
     feishu_map: dict[str, str] | None = None,
     errors: dict[str, int] | None = None,
     files: list[dict[str, Any]] | None = None,
+    ci_runs: list[dict[str, Any]] | None = (),
+    ci_failed_step: str | None = None,
 ) -> dict:
-    """reviews / comments / files 为 None 表示无权限读取；errors 记录读取失败部分的 HTTP 状态码。
+    """reviews / comments / files / ci_runs 为 None 表示无权限读取；errors 记录读取失败部分的 HTTP 状态码。
 
     头部：PR 标题，副标题「仓库 #号 · 作者」，状态标签。
-    正文：reviewer 与 AI 结论；折叠面板（标题为改动合计，展开为按目录汇总的改动文件）；
+    正文：reviewer、AI 结论、CI 状态；折叠面板（标题为改动合计，展开为按目录汇总的改动文件）；
     底部小号字：分支、评论数、最近动态；「查看 PR」按钮。
     合并/关闭后只剩一行小号字，末尾为「查看 PR」链接。
     """
@@ -270,6 +338,9 @@ def build_status_card(
             main.append(_no_access("评论和 AI review", errors.get("comments", 0)))
         if ai:
             main.append(_ai_line(ai))
+        ci_line = _ci_line(ci_runs, ci_failed_step, errors)
+        if ci_line:
+            main.append(ci_line)
 
         head = (pr.get("head") or {}).get("ref", "")
         base = (pr.get("base") or {}).get("ref", "")

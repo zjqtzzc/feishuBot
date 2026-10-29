@@ -14,7 +14,7 @@ from typing import Any
 from src.config import Config
 from src.feishu_card import is_ai_comment
 
-HANDLED_EVENTS = ("pull_request", "pull_request_review", "issue_comment")
+HANDLED_EVENTS = ("pull_request", "pull_request_review", "issue_comment", "workflow_job")
 
 
 @dataclass
@@ -25,6 +25,8 @@ class Trigger:
     activity: str | None
     # pull_request 事件自带的完整 PR 数据；读 PR 无权限时用它生成卡片
     pr: dict[str, Any] | None = None
+    # workflow_job 事件只有分支名：number 为 0，由 worker 按分支查出 PR 号
+    branch: str = ""
 
 
 @dataclass
@@ -117,6 +119,14 @@ def handle(
         return Result(401, "Invalid signature")
 
     repo = (data.get("repository") or {}).get("full_name", "")
+    if event_type == "workflow_job":
+        branch = (data.get("workflow_job") or {}).get("head_branch") or ""
+        tag = f"{repo}@{branch}"
+        if data.get("action") not in ("queued", "waiting", "in_progress", "completed"):
+            return Result(200, "ignored", data.get("action") or "unknown", tag)
+        if not repo or not branch:
+            return Result(400, "Missing repo/branch", tag=tag)
+        return Result(200, "queued", tag=tag, trigger=Trigger(repo, 0, None, branch=branch))
     if event_type == "issue_comment":
         issue = data.get("issue") or {}
         number = int(issue.get("number") or 0)

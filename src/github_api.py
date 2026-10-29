@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""GitHub API：读取 PR 当前状态（PR、reviews、评论、改动文件）"""
+"""GitHub API：读取 PR 当前状态（PR、reviews、评论、改动文件、CI）"""
 
 import logging
 import time
@@ -69,3 +69,18 @@ class GitHubAPI:
 
     def list_files(self, repo_name, pr_number):
         return self._get_all(f"{self.base_url}/repos/{repo_name}/pulls/{pr_number}/files")
+
+    def list_check_runs(self, repo_name, sha):
+        r = self._get(f"{self.base_url}/repos/{repo_name}/commits/{sha}/check-runs", {"per_page": 100})
+        return r.json().get("check_runs") or []
+
+    def get_job(self, repo_name, job_id):
+        """Actions job（含 steps）；Actions 的 job id 与其 check run id 相同。"""
+        return self._get(f"{self.base_url}/repos/{repo_name}/actions/jobs/{job_id}").json()
+
+    def find_open_pr(self, repo_name, branch):
+        """分支上打开的 PR 号，没有则返回 None。"""
+        owner = repo_name.split("/")[0]
+        params = {"head": f"{owner}:{branch}", "state": "open"}
+        pulls = self._get(f"{self.base_url}/repos/{repo_name}/pulls", params).json()
+        return pulls[0]["number"] if pulls else None

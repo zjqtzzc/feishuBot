@@ -50,17 +50,31 @@ FILES = [{"filename": n, "additions": a, "deletions": d} for n, a, d in [
     ("popstar-miniapp-provider/Dockerfile", 0, 11), ("popstar-miniapp-provider/src/main/java/com/tc/App.java", 86, 7),
 ]]
 
-# (名称, PR, reviews, 评论, 最近动态, 读取失败, 改动文件)
+_AI_JOB = {"id": 1, "name": "ai-review", "status": "completed", "conclusion": "success"}
+CI_RUNNING = [_AI_JOB, {"id": 2, "name": "build-test", "status": "in_progress", "conclusion": None,
+                        "started_at": "2026-10-28T10:12:00Z"}]
+CI_QUEUED = [{"id": 2, "name": "build-test", "status": "queued", "conclusion": None, "started_at": "2026-10-28T10:05:00Z"}]
+CI_OK = [_AI_JOB, {"id": 2, "name": "build-test", "status": "completed", "conclusion": "success",
+                   "started_at": "2026-10-28T10:12:00Z", "completed_at": "2026-10-28T10:35:00Z"}]
+CI_FAIL = [{"id": 2, "name": "build-test", "status": "completed", "conclusion": "failure",
+            "started_at": "2026-10-28T10:12:00Z", "completed_at": "2026-10-28T10:30:00Z",
+            "html_url": "https://github.com/TechCrafters-5/popstar-dev/actions/runs/1/job/2"}]
+
+# (名称, PR, reviews, 评论, 最近动态, 读取失败, 改动文件, CI check runs, CI 失败步骤)
 SAMPLES = [
-    ("进行中：待审 + AI 通过", PR, [], [AI_OK, HUMAN], ACTIVITY, {}, FILES),
+    ("进行中：待审 + AI 通过 + CI 运行中", PR, [], [AI_OK, HUMAN], ACTIVITY, {}, FILES, CI_RUNNING, None),
     ("进行中：通过 + 要求修改 + AI 不通过（第 2 轮）",
      {**PR, "requested_reviewers": []},
      [{"user": {"login": "zhanbo86"}, "state": "APPROVED"}, {"user": {"login": "steve-zhan"}, "state": "CHANGES_REQUESTED"}],
-     [AI_OK, AI_BAD], {"text": "**zhanbo86** approved", "at": time.time()}, {}, FILES[:3]),
-    ("进行中：评论和改动文件无权限读取", PR, [], None, ACTIVITY, {"comments": 403, "files": 403}, None),
-    ("Draft", {**PR, "draft": True}, [], [], {"text": "**zhenyonghit** converted to draft", "at": time.time()}, {},
-     [{"filename": "src/ethercat/igh_ready.cpp", "additions": 52, "deletions": 1}]),
-    ("已合并", {**PR, "state": "closed", "merged": True, "merged_by": {"login": "zhanbo86"}}, [], [AI_OK, AI_BAD], None, {}, None),
+     [AI_OK, AI_BAD], {"text": "**zhanbo86** approved", "at": time.time()}, {}, FILES[:3], CI_FAIL, "Run tests (ci_test.sh)"),
+    ("进行中：评论、改动文件、CI 无权限读取", PR, [], None, ACTIVITY, {"comments": 403, "files": 403, "ci": 403},
+     None, None, None),
+    ("Draft + CI 排队中", {**PR, "draft": True}, [], [], {"text": "**zhenyonghit** converted to draft", "at": time.time()},
+     {}, [{"filename": "src/ethercat/igh_ready.cpp", "additions": 52, "deletions": 1}], CI_QUEUED, None),
+    ("已合并", {**PR, "state": "closed", "merged": True, "merged_by": {"login": "zhanbo86"}}, [], [AI_OK, AI_BAD], None, {},
+     None, None, None),
+    ("进行中：CI 通过", PR, [{"user": {"login": "zhanbo86"}, "state": "APPROVED"}], [AI_OK], ACTIVITY, {}, FILES, CI_OK, None),
+    ("进行中：CI 失败但读不到失败步骤", PR, [], [AI_OK], ACTIVITY, {"ci_steps": 403}, FILES, CI_FAIL, None),
 ]
 
 def main() -> None:
@@ -73,10 +87,10 @@ def main() -> None:
         sys.exit("获取飞书 token 失败，检查 config.json 的 app_id / app_secret")
 
     only = sys.argv[2:]  # 可选：只发指定序号的示例，如 0 4
-    for i, (name, pr, reviews, comments, activity, errors, files) in enumerate(SAMPLES):
+    for i, (name, pr, reviews, comments, activity, errors, files, ci_runs, ci_step) in enumerate(SAMPLES):
         if only and str(i) not in only:
             continue
-        card = build_status_card(pr, reviews, comments, activity, REPO, {}, errors, files)
+        card = build_status_card(pr, reviews, comments, activity, REPO, {}, errors, files, ci_runs, ci_step)
         print(f"{name}: {'OK' if send_interactive_card(token, chat_id, card) else '发送失败'}")
 
 

@@ -12,7 +12,7 @@ from typing import Any
 from src.card_store import CardStore, pr_key
 from src.config import Config
 from src.feishu_api import RATE_LIMIT_CODES, patch_interactive_card, send_interactive_card
-from src.feishu_card import build_status_card, pr_state
+from src.feishu_card import build_status_card, failed_ci_run, failed_step_name, pr_state
 from src.feishu_credential import get_tenant_access_token
 from src.github_api import GitHubAPI, GitHubAPIError
 from src.handlers import Trigger
@@ -37,6 +37,12 @@ class _Job:
     # webhook 自带的完整 PR 数据（仅 pull_request 事件），读 PR 无权限时用来生成卡片
     pr: dict[str, Any] | None
     attempt: int = 0
+    # number 为 0 时：只知道分支（workflow_job 事件），先查出 PR 号
+    branch: str = ""
+
+    @property
+    def key(self) -> str:
+        return pr_key(self.repo, self.number) if self.number else f"{self.repo}@{self.branch}"
 
 
 class CardWorker:
@@ -50,10 +56,10 @@ class CardWorker:
 
     def submit(self, trig: Trigger) -> None:
         activity = {"text": trig.activity, "at": time.time()} if trig.activity else None
-        self._schedule(_Job(0, trig.repo, trig.number, activity, trig.pr), DEBOUNCE_SECONDS)
+        self._schedule(_Job(0, trig.repo, trig.number, activity, trig.pr, branch=trig.branch), DEBOUNCE_SECONDS)
 
     def _schedule(self, job: _Job, delay: float) -> None:
-        key = pr_key(job.repo, job.number)
+        key = job.key
         with self._cond:
             old = self._pending.get(key)
             if old:
@@ -80,7 +86,7 @@ class CardWorker:
         while True:
             job = self._next_due()
             try:
-                ok = self._refresh(job)
+                ok = self._refresh(job) if job.number else self._resolve(job)
             except Exception:
                 log.exception("[%s#%s] refresh crashed", job.repo, job.number)
                 ok = True
@@ -92,13 +98,26 @@ class CardWorker:
                 else:
                     log.error("[%s#%s] refresh failed, giving up", job.repo, job.number)
 
+    def _resolve(self, job: _Job) -> bool:
+        """按分支查出打开的 PR，再按 PR 排队刷新。"""
+        try:
+            number = self.gh.find_open_pr(job.repo, job.branch)
+        except GitHubAPIError as e:
+            log.warning("[%s] find PR by branch failed: %s", job.key, e)
+            return e.permanent
+        if number:
+            self._schedule(_Job(0, job.repo, number, None, None), DEBOUNCE_SECONDS)
+        else:
+            log.info("[%s] no open PR for branch", job.key)
+        return True
+
     def _refresh(self, job: _Job) -> bool:
         """返回 False 表示可重试的失败（网络、5xx、限流）。无权限（401/403/404）不重试，在卡片上提示。"""
         repo, number = job.repo, job.number
         ctx = f"[{repo}#{number}]"
         key = pr_key(repo, number)
         rec = self.store.get(key)
-        # 读取失败的部分：{"pr" | "reviews" | "comments": HTTP 状态码}
+        # 读取失败的部分：{"pr" | "reviews" | "comments" | "files" | "ci" | "ci_steps": HTTP 状态码}
         errors: dict[str, int] = {}
 
         def fetch(name: str, fn):
@@ -123,8 +142,16 @@ class CardWorker:
                 return True
             reviews = fetch("reviews", self.gh.list_reviews)
             comments = fetch("comments", self.gh.list_issue_comments)
-            # 合并/关闭后的卡片只有一行，不需要文件明细
-            files = None if state in ("merged", "closed") else fetch("files", self.gh.list_files)
+            # 合并/关闭后的卡片只有一行，不需要文件明细和 CI
+            files = ci_runs = ci_step = None
+            if state not in ("merged", "closed"):
+                files = fetch("files", self.gh.list_files)
+                sha = (pr.get("head") or {}).get("sha", "")
+                ci_runs = fetch("ci", lambda r, n: self.gh.list_check_runs(r, sha))
+                failed = failed_ci_run(ci_runs or [])
+                if failed:
+                    ci_job = fetch("ci_steps", lambda r, n: self.gh.get_job(r, failed["id"]))
+                    ci_step = failed_step_name(ci_job) if ci_job else None
         except GitHubAPIError as e:
             log.warning("%s GitHub error: %s", ctx, e)
             return False
@@ -134,7 +161,9 @@ class CardWorker:
             return False
 
         activity = job.activity or (rec or {}).get("activity")
-        card = build_status_card(pr, reviews, comments, activity, repo, self.user_map.as_dict(), errors, files)
+        card = build_status_card(
+            pr, reviews, comments, activity, repo, self.user_map.as_dict(), errors, files, ci_runs, ci_step
+        )
         closed = state in ("merged", "closed")
         closed_at = ((rec or {}).get("closed_at") or time.time()) if closed else None
 
