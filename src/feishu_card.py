@@ -25,7 +25,7 @@ CST = timezone(timedelta(hours=8))
 # 改动文件明细最多展示的行数
 MAX_FILE_GROUPS = 8
 
-# 不计入 CI 的检查（名字小写包含即排除）：AI review 已单独显示
+# 不计入 CI 的 workflow / job（名称或路径小写包含即排除）：AI review 已单独显示
 CI_EXCLUDE = ("ai-review",)
 CI_FAILED = frozenset({"failure", "timed_out", "startup_failure", "action_required"})
 CI_WAITING = frozenset({"queued", "waiting", "pending", "requested"})
@@ -260,10 +260,7 @@ def _ci_line(runs: list[dict[str, Any]] | None, failed_step: str | None, errors:
     if failed:
         r = failed[0]
         name = f"{r.get('name')} " if many else ""
-        if "ci_steps" in errors:
-            where = name + _no_access("失败步骤", errors["ci_steps"])
-        else:
-            where = f"{name}失败于「{failed_step}」" if failed_step else name.strip()
+        where = f"{name}失败于「{failed_step}」" if failed_step else name.strip()
         parts = [p for p in (f"{len(failed)}/{len(runs)} 失败" if many else "", where, _duration(r)) if p]
         parts.append(f"[查看日志]({r.get('html_url', '')})")
         return f"{_tag('CI 失败', 'red')} " + " · ".join(parts)
@@ -294,7 +291,7 @@ def build_status_card(
     feishu_map: dict[str, str] | None = None,
     errors: dict[str, int] | None = None,
     files: list[dict[str, Any]] | None = None,
-    ci_runs: list[dict[str, Any]] | None = (),
+    ci_runs: list[dict[str, Any]] | None = (),  # Actions jobs
     ci_failed_step: str | None = None,
 ) -> dict:
     """reviews / comments / files / ci_runs 为 None 表示无权限读取；errors 记录读取失败部分的 HTTP 状态码。

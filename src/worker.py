@@ -12,7 +12,7 @@ from typing import Any
 from src.card_store import CardStore, pr_key
 from src.config import Config
 from src.feishu_api import RATE_LIMIT_CODES, patch_interactive_card, send_interactive_card
-from src.feishu_card import build_status_card, failed_ci_run, failed_step_name, pr_state
+from src.feishu_card import CI_EXCLUDE, build_status_card, failed_ci_run, failed_step_name, pr_state
 from src.feishu_credential import get_tenant_access_token
 from src.github_api import GitHubAPI, GitHubAPIError
 from src.handlers import Trigger
@@ -117,7 +117,7 @@ class CardWorker:
         ctx = f"[{repo}#{number}]"
         key = pr_key(repo, number)
         rec = self.store.get(key)
-        # 读取失败的部分：{"pr" | "reviews" | "comments" | "files" | "ci" | "ci_steps": HTTP 状态码}
+        # 读取失败的部分：{"pr" | "reviews" | "comments" | "files" | "ci": HTTP 状态码}
         errors: dict[str, int] = {}
 
         def fetch(name: str, fn):
@@ -147,11 +147,9 @@ class CardWorker:
             if state not in ("merged", "closed"):
                 files = fetch("files", self.gh.list_files)
                 sha = (pr.get("head") or {}).get("sha", "")
-                ci_runs = fetch("ci", lambda r, n: self.gh.list_check_runs(r, sha))
+                ci_runs = fetch("ci", lambda r, n: self.gh.list_ci_jobs(r, sha, CI_EXCLUDE))
                 failed = failed_ci_run(ci_runs or [])
-                if failed:
-                    ci_job = fetch("ci_steps", lambda r, n: self.gh.get_job(r, failed["id"]))
-                    ci_step = failed_step_name(ci_job) if ci_job else None
+                ci_step = failed_step_name(failed) if failed else None
         except GitHubAPIError as e:
             log.warning("%s GitHub error: %s", ctx, e)
             return False

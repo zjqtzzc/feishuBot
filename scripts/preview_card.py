@@ -60,7 +60,7 @@ CI_FAIL = [{"id": 2, "name": "build-test", "status": "completed", "conclusion": 
             "started_at": "2026-10-28T10:12:00Z", "completed_at": "2026-10-28T10:30:00Z",
             "html_url": "https://github.com/TechCrafters-5/popstar-dev/actions/runs/1/job/2"}]
 
-# (名称, PR, reviews, 评论, 最近动态, 读取失败, 改动文件, CI check runs, CI 失败步骤)
+# (名称, PR, reviews, 评论, 最近动态, 读取失败, 改动文件, CI jobs, CI 失败步骤)
 SAMPLES = [
     ("进行中：待审 + AI 通过 + CI 运行中", PR, [], [AI_OK, HUMAN], ACTIVITY, {}, FILES, CI_RUNNING, None),
     ("进行中：通过 + 要求修改 + AI 不通过（第 2 轮）",
@@ -74,7 +74,6 @@ SAMPLES = [
     ("已合并", {**PR, "state": "closed", "merged": True, "merged_by": {"login": "zhanbo86"}}, [], [AI_OK, AI_BAD], None, {},
      None, None, None),
     ("进行中：CI 通过", PR, [{"user": {"login": "zhanbo86"}, "state": "APPROVED"}], [AI_OK], ACTIVITY, {}, FILES, CI_OK, None),
-    ("进行中：CI 失败但读不到失败步骤", PR, [], [AI_OK], ACTIVITY, {"ci_steps": 403}, FILES, CI_FAIL, None),
 ]
 
 def main() -> None:
