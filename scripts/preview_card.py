@@ -53,7 +53,7 @@ FILES = [{"filename": n, "additions": a, "deletions": d} for n, a, d in [
 _AI_JOB = {"id": 1, "name": "ai-review", "status": "completed", "conclusion": "success"}
 CI_RUNNING = [_AI_JOB, {"id": 2, "name": "build-test", "status": "in_progress", "conclusion": None,
                         "started_at": "2026-10-28T10:12:00Z"}]
-CI_QUEUED = [{"id": 2, "name": "build-test", "status": "queued", "conclusion": None, "started_at": "2026-10-28T10:05:00Z"}]
+CI_QUEUED = [{"id": 2, "name": "build-test", "status": "queued", "conclusion": None, "created_at": "2026-10-28T10:05:00Z"}]
 CI_OK = [_AI_JOB, {"id": 2, "name": "build-test", "status": "completed", "conclusion": "success",
                    "started_at": "2026-10-28T10:12:00Z", "completed_at": "2026-10-28T10:35:00Z"}]
 CI_FAIL = [{"id": 2, "name": "build-test", "status": "completed", "conclusion": "failure",

@@ -19,6 +19,8 @@ STATE_STYLE = {
 GITHUB_ACTIONS_LOGINS = frozenset({"github-actions[bot]", "github-actions"})
 
 AI_FORMAT_ERROR = "AI Review 格式匹配失败，请查看 GitHub 原文"
+# AI 结论里出现任一词即判为不通过（先于「接受 / 通过」判断）
+AI_REJECT_WORDS = ("不可接受", "无法接受", "不能接受", "不予接受", "不接受", "不通过", "不建议合并")
 
 CST = timezone(timedelta(hours=8))
 
@@ -115,7 +117,7 @@ def _ai_line(ai: list[dict[str, Any]]) -> str:
     conclusion = ai_conclusion(ai[-1].get("body") or "")
     if conclusion == AI_FORMAT_ERROR:
         tag = _tag("AI", "neutral")
-    elif re.search(r"不可接受|不通过", conclusion):
+    elif any(w in conclusion for w in AI_REJECT_WORDS):
         tag = _tag("AI 不通过", "red")
     elif re.search(r"可以?接受|通过", conclusion):
         tag = _tag("AI 通过", "green")
@@ -270,7 +272,8 @@ def _ci_line(runs: list[dict[str, Any]] | None, failed_step: str | None, errors:
         return f"{_tag('CI 运行中', 'blue')} " + (_grey(f"{_fmt_time(start)} 开始") if start else "")
     waiting = [r for r in runs if r.get("status") in CI_WAITING]
     if waiting:
-        start = _parse_iso(waiting[0].get("started_at"))
+        # 排队中的 job 还没开始，排队起点是 created_at
+        start = _parse_iso(waiting[0].get("created_at") or waiting[0].get("started_at"))
         return f"{_tag('CI 排队中', 'neutral')} " + (_grey(f"{_fmt_time(start)} 开始排队") if start else "")
     if any(r.get("conclusion") == "cancelled" for r in runs):
         return _tag("CI 已取消", "neutral")
